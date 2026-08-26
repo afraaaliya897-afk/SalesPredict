@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sales Intelligence Platform</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <rect width="32" height="32" rx="8" fill="#3B82F6"/>
+                        <path d="M8 20L12 14L16 18L24 10" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <circle cx="24" cy="10" r="2" fill="white"/>
+                    </svg>
+                    <span>Sales Intelligence</span>
+                </div>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-section="chat">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    <span>Chat</span>
+                </button>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <div class="status-dot"></div>
+                    <span>System Online</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Chat Section -->
+            <section id="chat-section" class="content-section active">
+                <header class="section-header">
+                    <div>
+                        <h1>Sales Chat</h1>
+                        <p class="subtitle">Ask questions about your sales data</p>
+                    </div>
+                </header>
+
+                <div class="chat-container">
+                    <div class="chat-main">
+                        <div class="messages" id="messages">
+                            <div class="message system-message">
+                                <div class="message-content">
+                                    <p>Welcome to Sales Intelligence. Ask about orders, items, customers, channels, or daily sales.</p>
+                                    <p class="message-hint">Try: "top 5 items by quantity sold in the last 90 days" · "daily sales trend this month" · "total orders this month" · "top customers by order count"</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chat-input-container">
+                            <form id="chat-form" class="chat-input">
+                                <input 
+                                    type="text" 
+                                    id="question-input" 
+                                    placeholder="Ask a question about your sales data..."
+                                    autocomplete="off"
+                                >
+                                <button type="submit" id="send-button">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                                    </svg>
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Debug Panel -->
+                    <aside class="debug-panel" id="debug-panel">
+                        <div class="debug-header">
+                            <h3>Query Details</h3>
+                            <button class="debug-toggle" id="debug-toggle" title="Hide panel">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="debug-content" id="debug-content">
+                            <div class="debug-empty">
+                                Ask a question to see how it's processed
+                            </div>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

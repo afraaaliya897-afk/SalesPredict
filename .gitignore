@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.qodo/
+.vscode/
+
+# Local databases and source extracts
+*.duckdb
+*.duckdb.wal
+data/online_retail.csv
+data/oneline_retail.xlsx
+data/*.xlsx
+
+# OS
+Thumbs.db
+.DS_Store
