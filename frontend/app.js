@@ -12,6 +12,18 @@ const debugContent = document.getElementById('debug-content');
 
 const chatCharts = {};
 
+const FORECAST_MODEL_STYLES = {
+    prophet: { color: '#2563EB', fill: 'rgba(37, 99, 235, 0.14)' },
+    moving_average: { color: '#D97706', fill: 'rgba(217, 119, 6, 0.14)' },
+    seasonal_naive: { color: '#7C3AED', fill: 'rgba(124, 58, 237, 0.14)' },
+};
+
+const FORECAST_MODEL_LABELS = {
+    prophet: 'Prophet',
+    moving_average: 'Moving average',
+    seasonal_naive: 'Seasonal naive',
+};
+
 navItems.forEach(item => {
     item.addEventListener('click', () => {
         const sectionId = item.dataset.section;
@@ -123,53 +135,214 @@ function addAssistantResult(data) {
         stat.appendChild(value);
         contentDiv.appendChild(stat);
         contentDiv.appendChild(buildTable(tableData, data.dimension_label, data.metric_label, true));
-    } else if ((chartType === 'bar' || chartType === 'line') && data.chart_data) {
+    } else if ((chartType === 'bar' || chartType === 'line' || chartType === 'forecast') && data.chart_data) {
         const card = document.createElement('div');
         card.className = 'chat-chart-card';
 
         const wrap = document.createElement('div');
-        wrap.className = 'chat-chart-wrap';
+        wrap.className = chartType === 'forecast' ? 'chat-chart-wrap forecast' : 'chat-chart-wrap';
         const canvas = document.createElement('canvas');
         const chartId = `chart-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         canvas.id = chartId;
-        wrap.appendChild(canvas);
-        card.appendChild(wrap);
 
-        const tableWrap = buildTable(tableData, data.dimension_label, data.metric_label, false);
-        tableWrap.style.display = 'none';
-        card.appendChild(tableWrap);
+        if (chartType === 'forecast') {
+            const chartData = data.chart_data;
+            chartData.view = 'all';
+            const models = chartData.models || [];
+            const winnerName = chartData.model || 'Unknown';
+            const selection = chartData.selection || '';
 
-        const actions = document.createElement('div');
-        actions.className = 'chat-chart-actions';
+            const modelBar = document.createElement('div');
+            modelBar.className = 'forecast-model-bar';
 
-        const tableBtn = document.createElement('button');
-        tableBtn.type = 'button';
-        tableBtn.textContent = 'View as table';
-        tableBtn.addEventListener('click', () => {
-            const showing = tableWrap.style.display !== 'none';
-            tableWrap.style.display = showing ? 'none' : 'block';
-            wrap.style.display = showing ? 'block' : 'none';
-            tableBtn.textContent = showing ? 'View as table' : 'View as chart';
-        });
+            const badge = document.createElement('div');
+            badge.className = 'forecast-model-selected';
+            badge.textContent = `All 3 models on the chart · best backtest: ${winnerName}`;
+            modelBar.appendChild(badge);
 
-        const downloadBtn = document.createElement('button');
-        downloadBtn.type = 'button';
-        downloadBtn.textContent = 'Download chart';
-        downloadBtn.addEventListener('click', () => downloadChart(card, chartId));
+            const why = document.createElement('div');
+            why.className = 'forecast-model-why';
+            why.textContent = selection
+                ? `${selection}. Click a card to focus that line; click Compare all to see every model.`
+                : 'Click a card to focus that line; click Compare all to see every model.';
+            modelBar.appendChild(why);
 
-        actions.appendChild(tableBtn);
-        actions.appendChild(downloadBtn);
-        card.appendChild(actions);
-        contentDiv.appendChild(card);
+            const list = document.createElement('div');
+            list.className = 'forecast-model-scores';
 
-        requestAnimationFrame(() => {
-            renderChatChart(canvas, chartType, data.chart_data, data.metric_label || 'Value');
-        });
+            const chips = [];
+            const makeChip = (view, title, wapeText, extraClass) => {
+                const chip = document.createElement('button');
+                chip.type = 'button';
+                chip.className = `forecast-model-chip ${extraClass || ''}`.trim();
+                chip.dataset.view = view;
+                const nameEl = document.createElement('span');
+                nameEl.className = 'forecast-chip-name';
+                nameEl.textContent = title;
+                const wapeEl = document.createElement('span');
+                wapeEl.className = 'forecast-chip-wape';
+                wapeEl.textContent = wapeText;
+                chip.appendChild(nameEl);
+                chip.appendChild(wapeEl);
+                chips.push(chip);
+                list.appendChild(chip);
+                return chip;
+            };
+
+            makeChip('all', 'Compare all', `${Math.max(models.length, 1)} models`, 'compare active');
+            models.forEach((m) => {
+                const wape = m.wape == null ? 'n/a' : `${(m.wape * 100).toFixed(1)}%`;
+                const label = FORECAST_MODEL_LABELS[m.id] || m.name;
+                const extra = `${m.id}${m.winner ? ' winner' : ''}`;
+                const chip = makeChip(m.id, label, wape, extra);
+                const meta = document.createElement('span');
+                meta.className = 'forecast-chip-meta';
+                meta.textContent = m.winner ? 'WAPE · best' : 'WAPE';
+                chip.appendChild(meta);
+            });
+            modelBar.appendChild(list);
+            card.appendChild(modelBar);
+
+            wrap.appendChild(canvas);
+            card.appendChild(wrap);
+
+            const tableHost = document.createElement('div');
+            let tableWrap = buildTable(
+                forecastTableFromChart(chartData, 'all'),
+                data.dimension_label,
+                data.metric_label,
+                false
+            );
+            tableHost.appendChild(tableWrap);
+            card.appendChild(tableHost);
+
+            const applyView = (view) => {
+                chartData.view = view;
+                chips.forEach((chip) => {
+                    chip.classList.toggle('active', chip.dataset.view === view);
+                });
+                if (view === 'all') {
+                    badge.textContent = `All 3 models on the chart · best backtest: ${winnerName}`;
+                } else {
+                    const focused = models.find((m) => m.id === view);
+                    const name = focused ? (FORECAST_MODEL_LABELS[focused.id] || focused.name) : view;
+                    badge.textContent = focused && focused.winner
+                        ? `Showing ${name} (best backtest)`
+                        : `Showing ${name}`;
+                }
+                const existing = chatCharts[chartId];
+                if (existing) existing.destroy();
+                renderChatChart(canvas, 'forecast', chartData, data.metric_label || 'Value');
+                const nextTable = buildTable(
+                    forecastTableFromChart(chartData, view),
+                    data.dimension_label,
+                    data.metric_label,
+                    tableWrap.style.display !== 'none'
+                );
+                tableHost.replaceChildren(nextTable);
+                tableWrap = nextTable;
+            };
+
+            chips.forEach((chip) => {
+                chip.addEventListener('click', () => applyView(chip.dataset.view));
+            });
+
+            const actions = document.createElement('div');
+            actions.className = 'chat-chart-actions';
+
+            const tableBtn = document.createElement('button');
+            tableBtn.type = 'button';
+            tableBtn.textContent = 'View as table';
+            tableBtn.addEventListener('click', () => {
+                const showing = tableWrap.style.display !== 'none';
+                tableWrap.style.display = showing ? 'none' : 'block';
+                wrap.style.display = showing ? 'block' : 'none';
+                tableBtn.textContent = showing ? 'View as table' : 'View as chart';
+            });
+
+            const downloadBtn = document.createElement('button');
+            downloadBtn.type = 'button';
+            downloadBtn.textContent = 'Download chart';
+            downloadBtn.addEventListener('click', () => downloadChart(card, chartId));
+
+            actions.appendChild(tableBtn);
+            actions.appendChild(downloadBtn);
+            card.appendChild(actions);
+            contentDiv.appendChild(card);
+
+            requestAnimationFrame(() => {
+                renderChatChart(canvas, chartType, chartData, data.metric_label || 'Value');
+            });
+        } else {
+            wrap.appendChild(canvas);
+            card.appendChild(wrap);
+
+            const tableWrap = buildTable(tableData, data.dimension_label, data.metric_label, false);
+            tableWrap.style.display = 'none';
+            card.appendChild(tableWrap);
+
+            const actions = document.createElement('div');
+            actions.className = 'chat-chart-actions';
+
+            const tableBtn = document.createElement('button');
+            tableBtn.type = 'button';
+            tableBtn.textContent = 'View as table';
+            tableBtn.addEventListener('click', () => {
+                const showing = tableWrap.style.display !== 'none';
+                tableWrap.style.display = showing ? 'none' : 'block';
+                wrap.style.display = showing ? 'block' : 'none';
+                tableBtn.textContent = showing ? 'View as table' : 'View as chart';
+            });
+
+            const downloadBtn = document.createElement('button');
+            downloadBtn.type = 'button';
+            downloadBtn.textContent = 'Download chart';
+            downloadBtn.addEventListener('click', () => downloadChart(card, chartId));
+
+            actions.appendChild(tableBtn);
+            actions.appendChild(downloadBtn);
+            card.appendChild(actions);
+            contentDiv.appendChild(card);
+
+            requestAnimationFrame(() => {
+                renderChatChart(canvas, chartType, data.chart_data, data.metric_label || 'Value');
+            });
+        }
     }
 
     messageDiv.appendChild(contentDiv);
     messagesContainer.appendChild(messageDiv);
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
+
+function headerForKey(key, dimensionLabel, metricLabel) {
+    const labels = {
+        metric_value: metricLabel || 'Value',
+        date: 'Date',
+        actual: 'Actual',
+        quantity: 'Forecast',
+        lower: 'Lower',
+        upper: 'Upper',
+        prophet: 'Prophet',
+        moving_average: 'Moving average',
+        seasonal_naive: 'Seasonal naive',
+    };
+    if (labels[key]) return labels[key];
+    return dimensionLabel || key;
+}
+
+function formatTableCell(val) {
+    if (val == null || val === '') return '—';
+    if (typeof val === 'number') {
+        return { numeric: true, text: val.toLocaleString(undefined, { maximumFractionDigits: 1 }) };
+    }
+    if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(val)) {
+        return { numeric: false, text: val.slice(0, 10) };
+    }
+    if (val instanceof Date && !Number.isNaN(val.getTime())) {
+        return { numeric: false, text: val.toISOString().slice(0, 10) };
+    }
+    return { numeric: false, text: String(val) };
 }
 
 function buildTable(rows, dimensionLabel, metricLabel, visible) {
@@ -185,8 +358,7 @@ function buildTable(rows, dimensionLabel, metricLabel, visible) {
     const keys = rows.length ? Object.keys(rows[0]) : ['metric_value'];
     keys.forEach(key => {
         const th = document.createElement('th');
-        if (key === 'metric_value') th.textContent = metricLabel || 'Value';
-        else th.textContent = dimensionLabel || key;
+        th.textContent = headerForKey(key, dimensionLabel, metricLabel);
         headRow.appendChild(th);
     });
     thead.appendChild(headRow);
@@ -197,13 +369,9 @@ function buildTable(rows, dimensionLabel, metricLabel, visible) {
         const tr = document.createElement('tr');
         keys.forEach(key => {
             const td = document.createElement('td');
-            const val = row[key];
-            if (typeof val === 'number') {
-                td.className = 'num';
-                td.textContent = val.toLocaleString();
-            } else {
-                td.textContent = val == null ? '—' : String(val);
-            }
+            const cell = formatTableCell(row[key]);
+            if (cell.numeric) td.className = 'num';
+            td.textContent = cell.text;
             tr.appendChild(td);
         });
         tbody.appendChild(tr);
@@ -211,6 +379,155 @@ function buildTable(rows, dimensionLabel, metricLabel, visible) {
     table.appendChild(tbody);
     wrap.appendChild(table);
     return wrap;
+}
+
+function monthLabel(iso) {
+    const d = new Date(String(iso).slice(0, 10) + 'T00:00:00');
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toLocaleString('en-US', { month: 'short', year: 'numeric' });
+}
+
+function weekLabel(iso) {
+    const d = new Date(String(iso).slice(0, 10) + 'T00:00:00');
+    if (Number.isNaN(d.getTime())) return String(iso);
+    const day = (d.getDay() + 6) % 7;
+    d.setDate(d.getDate() - day);
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function bucketKey(iso, grain) {
+    const raw = String(iso).slice(0, 10);
+    if (grain === 'month') return raw.slice(0, 7);
+    if (grain === 'week') {
+        const d = new Date(raw + 'T00:00:00');
+        const day = (d.getDay() + 6) % 7;
+        d.setDate(d.getDate() - day);
+        return d.toISOString().slice(0, 10);
+    }
+    return raw;
+}
+
+function sumBucket(values) {
+    const nums = values.filter((v) => v != null && !Number.isNaN(Number(v)));
+    if (!nums.length) return null;
+    return nums.reduce((a, b) => a + Number(b), 0);
+}
+
+function forecastTableFromChart(chartData, view) {
+    const labels = chartData.labels || [];
+    const hist = chartData.historical || [];
+    const models = chartData.models || [];
+    const focused = view && view !== 'all' ? models.find((m) => m.id === view) : null;
+    const num = (arr, i) => {
+        if (!arr || i >= arr.length) return null;
+        const v = arr[i];
+        return v == null || v === '' ? null : Number(v);
+    };
+    return labels.map((label, i) => {
+        const row = { date: String(label), actual: num(hist, i) };
+        if (focused) {
+            row.quantity = num(focused.forecast, i);
+            row.lower = num(focused.lower, i);
+            row.upper = num(focused.upper, i);
+        } else if (models.length) {
+            models.forEach((m) => {
+                row[m.id] = num(m.forecast, i);
+            });
+        } else {
+            row.quantity = num(chartData.forecast, i);
+            row.lower = num(chartData.lower, i);
+            row.upper = num(chartData.upper, i);
+        }
+        return row;
+    });
+}
+
+function prepareForecastSeries(chartData) {
+    const labels = chartData.labels || [];
+    const historical = chartData.historical || [];
+    const models = (chartData.models && chartData.models.length)
+        ? chartData.models.map((m) => ({
+            id: m.id,
+            name: m.name,
+            winner: !!m.winner,
+            forecast: m.forecast || [],
+            lower: m.lower || [],
+            upper: m.upper || [],
+        }))
+        : [{
+            id: 'selected',
+            name: chartData.model || 'Forecast',
+            winner: true,
+            forecast: chartData.forecast || [],
+            lower: chartData.lower || [],
+            upper: chartData.upper || [],
+        }];
+    const n = labels.length;
+
+    const asDisplay = (iso, grain) => {
+        if (grain === 'month') return monthLabel(String(iso).slice(0, 7) + '-01');
+        if (grain === 'week') return weekLabel(iso);
+        const d = new Date(String(iso).slice(0, 10) + 'T00:00:00');
+        return Number.isNaN(d.getTime())
+            ? String(iso)
+            : d.toLocaleString('en-US', { month: 'short', day: 'numeric' });
+    };
+
+    if (chartData.grain === 'month') {
+        return {
+            labels: labels.map((iso) => asDisplay(iso, 'month')),
+            historical,
+            models,
+            grain: 'month',
+        };
+    }
+
+    const grain = n >= 120 ? 'month' : n >= 50 ? 'week' : 'day';
+    if (grain === 'day') {
+        return {
+            labels: labels.map((iso) => asDisplay(iso, 'day')),
+            historical,
+            models,
+            grain,
+        };
+    }
+
+    const order = [];
+    const buckets = new Map();
+    labels.forEach((iso, i) => {
+        const key = bucketKey(iso, grain);
+        if (!buckets.has(key)) {
+            buckets.set(key, {
+                hist: [],
+                models: models.map(() => ({ fc: [], lo: [], hi: [] })),
+            });
+            order.push(key);
+        }
+        const b = buckets.get(key);
+        b.hist.push(historical[i]);
+        models.forEach((m, mi) => {
+            b.models[mi].fc.push(m.forecast[i]);
+            b.models[mi].lo.push(m.lower[i]);
+            b.models[mi].hi.push(m.upper[i]);
+        });
+    });
+
+    const outHist = [];
+    const outModels = models.map((m) => ({ ...m, forecast: [], lower: [], upper: [] }));
+    const outLabels = [];
+    order.forEach((key) => {
+        const b = buckets.get(key);
+        outLabels.push(grain === 'month' ? monthLabel(key + '-01') : weekLabel(key));
+        outHist.push(sumBucket(b.hist));
+        outModels.forEach((m, mi) => {
+            m.forecast.push(sumBucket(b.models[mi].fc));
+            const lo = sumBucket(b.models[mi].lo);
+            const hi = sumBucket(b.models[mi].hi);
+            m.lower.push(lo == null ? null : Math.max(0, lo));
+            m.upper.push(hi == null ? null : Math.max(0, hi));
+        });
+    });
+    return { labels: outLabels, historical: outHist, models: outModels, grain };
 }
 
 function renderChatChart(canvas, chartType, chartData, metricLabel) {
@@ -222,6 +539,175 @@ function renderChatChart(canvas, chartType, chartData, metricLabel) {
     }
 
     const labels = chartData.labels || [];
+    
+    if (chartType === 'forecast') {
+        const series = prepareForecastSeries(chartData);
+        const view = chartData.view || 'all';
+        const yTitle = series.grain === 'month'
+            ? 'Units per month'
+            : series.grain === 'week'
+                ? 'Units per week'
+                : 'Units per day';
+        const showPoints = series.labels.length <= 24;
+        const focused = view !== 'all' ? series.models.find((m) => m.id === view) : null;
+
+        const datasets = [{
+            label: 'Actual demand',
+            data: series.historical,
+            borderColor: '#9CA3AF',
+            backgroundColor: '#9CA3AF',
+            borderWidth: 1.75,
+            tension: 0.15,
+            pointRadius: showPoints ? 3 : 0,
+            pointHoverRadius: 4,
+            pointBackgroundColor: '#9CA3AF',
+            pointBorderColor: '#fff',
+            pointBorderWidth: 1,
+            fill: false,
+            spanGaps: false,
+        }];
+
+        series.models.forEach((m) => {
+            const style = FORECAST_MODEL_STYLES[m.id] || { color: '#2563EB', fill: 'rgba(37, 99, 235, 0.14)' };
+            const isFocus = focused ? m.id === focused.id : true;
+            const faded = focused && m.id !== focused.id;
+            datasets.push({
+                label: FORECAST_MODEL_LABELS[m.id] || m.name,
+                data: m.forecast,
+                borderColor: style.color,
+                backgroundColor: style.color,
+                borderWidth: isFocus ? 2.6 : 1.5,
+                borderDash: faded ? [5, 4] : [],
+                tension: 0.15,
+                pointRadius: showPoints && isFocus ? 4 : 0,
+                pointHoverRadius: 5,
+                pointBackgroundColor: style.color,
+                pointBorderColor: '#fff',
+                pointBorderWidth: 1,
+                fill: false,
+                spanGaps: false,
+                hidden: false,
+            });
+            if (focused && m.id === focused.id) {
+                datasets.push({
+                    label: 'Forecast range',
+                    data: m.upper,
+                    borderColor: 'transparent',
+                    backgroundColor: style.fill,
+                    borderWidth: 0,
+                    tension: 0.15,
+                    pointRadius: 0,
+                    fill: '+1',
+                });
+                datasets.push({
+                    label: 'Lower Bound',
+                    data: m.lower,
+                    borderColor: 'transparent',
+                    backgroundColor: style.fill,
+                    borderWidth: 0,
+                    tension: 0.15,
+                    pointRadius: 0,
+                    fill: false,
+                });
+            }
+        });
+
+        const title = focused
+            ? `Demand forecast — ${FORECAST_MODEL_LABELS[focused.id] || focused.name}`
+            : 'Demand forecast — all 3 models';
+
+        const chart = new Chart(canvas, {
+            type: 'line',
+            data: {
+                labels: series.labels,
+                datasets,
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'top',
+                        align: 'end',
+                        labels: {
+                            boxWidth: 14,
+                            boxHeight: 3,
+                            usePointStyle: false,
+                            font: { size: 11 },
+                            color: '#4B5563',
+                            filter: (item) => item.text !== 'Lower Bound' && item.text !== 'Forecast range',
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: title,
+                        color: '#111827',
+                        font: { size: 14, weight: '600' },
+                        padding: { bottom: 4 },
+                        align: 'start'
+                    },
+                    tooltip: {
+                        enabled: true,
+                        mode: 'index',
+                        intersect: false,
+                        backgroundColor: '#111827',
+                        titleColor: '#F9FAFB',
+                        bodyColor: '#E5E7EB',
+                        displayColors: true,
+                        callbacks: {
+                            label: (ctx) => {
+                                if (ctx.dataset.label === 'Lower Bound' || ctx.dataset.label === 'Forecast range') {
+                                    return null;
+                                }
+                                const value = ctx.raw;
+                                if (value === null || value === undefined) return null;
+                                return `${ctx.dataset.label}: ${Number(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: { display: false, drawBorder: false },
+                        ticks: {
+                            font: { size: 11 },
+                            color: '#6B7280',
+                            maxRotation: 0,
+                            autoSkip: true,
+                            maxTicksLimit: series.grain === 'month' ? 12 : 10
+                        }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        border: { display: false },
+                        grid: {
+                            color: 'rgba(0,0,0,0.06)',
+                            borderDash: [4, 4],
+                            drawBorder: false
+                        },
+                        ticks: {
+                            font: { size: 11 },
+                            color: '#6B7280',
+                            callback: (value) => Number(value).toLocaleString()
+                        },
+                        title: {
+                            display: true,
+                            text: yTitle,
+                            color: '#6B7280',
+                            font: { size: 11 }
+                        }
+                    }
+                }
+            }
+        });
+
+        chatCharts[canvas.id] = chart;
+        return;
+    }
+
+    // Original logic for bar/line charts
     const values = chartData.values || [];
     const isBar = chartType === 'bar';
 
@@ -316,7 +802,7 @@ function addLoadingMessage() {
     contentDiv.className = 'message-content';
 
     const loadingText = document.createElement('span');
-    loadingText.textContent = 'Thinking';
+    loadingText.textContent = 'Planning query';
 
     const loadingDots = document.createElement('div');
     loadingDots.className = 'loading-dots';

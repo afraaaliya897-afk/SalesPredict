@@ -3,12 +3,14 @@ __pycache__/
 .qodo/
 .vscode/
 
-# Local databases and source extracts
+# Local databases, source extracts, and generated eval/forecast logs
 *.duckdb
 *.duckdb.wal
 data/online_retail.csv
 data/oneline_retail.xlsx
 data/*.xlsx
+forecasts_log.jsonl
+eval_results.csv
 
 # OS
 Thumbs.db

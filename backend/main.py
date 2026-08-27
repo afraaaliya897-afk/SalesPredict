@@ -18,7 +18,12 @@ app = FastAPI(title="Sales Intelligence API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,6 +53,12 @@ class ChatResponse(BaseModel):
 @app.get("/")
 def root():
     return FileResponse(str(frontend_path / "index.html"))
+
+
+@app.get("/favicon.ico")
+@app.get("/favicon.svg")
+def favicon():
+    return FileResponse(str(frontend_path / "favicon.svg"), media_type="image/svg+xml")
 
 
 @app.get("/api")

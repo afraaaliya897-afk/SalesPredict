@@ -415,10 +415,125 @@ body {
     margin-top: 12px;
 }
 
+.forecast-model-bar {
+    margin-bottom: 12px;
+}
+
+.forecast-model-selected {
+    font-size: 15px;
+    font-weight: 700;
+    color: #111827;
+}
+
+.forecast-model-why {
+    font-size: 12px;
+    color: #6b7280;
+    margin-top: 3px;
+}
+
+.forecast-model-scores {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.forecast-model-chip {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    text-align: left;
+    font-size: 11px;
+    color: #4b5563;
+    background: #fff;
+    border: 2px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 10px 12px;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.forecast-model-chip:hover {
+    border-color: #9ca3af;
+}
+
+.forecast-model-chip.active {
+    border-color: #111827;
+    box-shadow: 0 0 0 1px #111827;
+}
+
+.forecast-chip-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
+}
+
+.forecast-chip-wape {
+    font-size: 20px;
+    font-weight: 800;
+    line-height: 1.1;
+    color: #111827;
+}
+
+.forecast-chip-meta {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: #6b7280;
+}
+
+.forecast-model-chip.compare .forecast-chip-wape {
+    color: #111827;
+}
+
+.forecast-model-chip.prophet {
+    border-left: 4px solid #2563EB;
+}
+
+.forecast-model-chip.prophet .forecast-chip-wape {
+    color: #2563EB;
+}
+
+.forecast-model-chip.moving_average {
+    border-left: 4px solid #D97706;
+}
+
+.forecast-model-chip.moving_average .forecast-chip-wape {
+    color: #D97706;
+}
+
+.forecast-model-chip.seasonal_naive {
+    border-left: 4px solid #7C3AED;
+}
+
+.forecast-model-chip.seasonal_naive .forecast-chip-wape {
+    color: #7C3AED;
+}
+
+.forecast-model-chip.winner {
+    background: #f8fafc;
+}
+
+.forecast-model-chip.winner .forecast-chip-meta {
+    color: #047857;
+}
+
 .chat-chart-wrap {
     position: relative;
     height: 280px;
     width: 100%;
+}
+
+.chat-chart-wrap.forecast {
+    height: 380px;
+}
+
+@media (max-width: 720px) {
+    .forecast-model-scores {
+        grid-template-columns: 1fr 1fr;
+    }
 }
 
 .chat-chart-actions {

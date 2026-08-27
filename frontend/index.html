@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sales Intelligence Platform</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -55,7 +56,7 @@
                             <div class="message system-message">
                                 <div class="message-content">
                                     <p>Welcome to Sales Intelligence. Ask about orders, items, customers, channels, or daily sales.</p>
-                                    <p class="message-hint">Try: "top 5 items by quantity sold in the last 90 days" · "daily sales trend this month" · "total orders this month" · "top customers by order count"</p>
+                                    <p class="message-hint">Try: "top 5 items by quantity sold in the last 90 days" · "daily sales trend this month" · "total orders this month" · "total orders previous month" · "forecast sales for next 30 days"</p>
                                 </div>
                             </div>
                         </div>
@@ -100,8 +101,8 @@
         </main>
     </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="/static/vendor/chart.umd.min.js"></script>
+    <script src="/static/vendor/html2canvas.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>
