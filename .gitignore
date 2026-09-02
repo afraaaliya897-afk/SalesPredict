@@ -11,6 +11,13 @@ data/oneline_retail.xlsx
 data/*.xlsx
 forecasts_log.jsonl
 eval_results.csv
+sql_memory.jsonl
+sql_rejections.jsonl
+parallel_comparison_log.jsonl
+orphaned_sold_monitor.jsonl
+
+# Environment variables
+.env
 
 # OS
 Thumbs.db

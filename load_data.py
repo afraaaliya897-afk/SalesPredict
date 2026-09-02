@@ -104,11 +104,89 @@ def build_database() -> None:
         LEFT JOIN sales_order so ON i.number = so.sales_order_number
         """
     )
+    
+    # Print basic counts
+    print("="*80)
+    print("DATA LOAD SUMMARY")
+    print("="*80)
     print("sales_order", con.execute("SELECT COUNT(*) FROM sales_order").fetchone()[0])
     print(
         "inventory_transaction",
         con.execute("SELECT COUNT(*) FROM inventory_transaction").fetchone()[0],
     )
+    
+    # Relationship validation reporting
+    print("\n" + "="*80)
+    print("RELATIONSHIP VALIDATION")
+    print("="*80)
+    
+    # Check for sales order inventory records without matching header
+    orphaned_sales = con.execute("""
+        SELECT COUNT(*) 
+        FROM inventory_transaction 
+        WHERE reference = 'Sales order' 
+          AND (number IS NULL OR number NOT IN (SELECT sales_order_number FROM sales_order))
+    """).fetchone()[0]
+    
+    total_sales_inv = con.execute("""
+        SELECT COUNT(*) 
+        FROM inventory_transaction 
+        WHERE reference = 'Sales order'
+    """).fetchone()[0]
+    
+    if total_sales_inv > 0:
+        orphan_pct = (orphaned_sales / total_sales_inv * 100)
+        print(f"Sales order inventory records: {total_sales_inv:,}")
+        print(f"  - Without matching sales_order header: {orphaned_sales:,} ({orphan_pct:.2f}%)")
+        if orphaned_sales > 100:
+            print(f"  WARNING: {orphaned_sales} sales transactions lack order header data!")
+    
+    # Check total orphaned records (all reference types)
+    total_orphaned = con.execute("""
+        SELECT COUNT(*) 
+        FROM inventory_transaction 
+        WHERE number IS NULL OR number NOT IN (SELECT sales_order_number FROM sales_order)
+    """).fetchone()[0]
+    
+    total_inv = con.execute("SELECT COUNT(*) FROM inventory_transaction").fetchone()[0]
+    orphan_pct_all = (total_orphaned / total_inv * 100) if total_inv > 0 else 0
+    
+    print(f"\nTotal orphaned inventory records (all types): {total_orphaned:,} ({orphan_pct_all:.1f}%)")
+    print("  (This includes non-sales transactions: Transfers, Purchases, BOM, etc.)")
+    
+    # Create views
+    print("\n" + "="*80)
+    print("CREATING BUSINESS VIEWS")
+    print("="*80)
+    
+    from text_to_sql import VIEW_DDL
+
+    for ddl in VIEW_DDL:
+        con.execute(ddl)
+    print("v_orders", con.execute("SELECT COUNT(*) FROM v_orders").fetchone()[0])
+    print("v_sold", con.execute("SELECT COUNT(*) FROM v_sold").fetchone()[0])
+    
+    # Check data completeness in v_sold
+    null_customers = con.execute("""
+        SELECT COUNT(*) 
+        FROM v_sold 
+        WHERE customer_account IS NULL
+    """).fetchone()[0]
+    
+    if null_customers > 0:
+        v_sold_total = con.execute("SELECT COUNT(*) FROM v_sold").fetchone()[0]
+        null_pct = (null_customers / v_sold_total * 100) if v_sold_total > 0 else 0
+        print(f"  - Records with NULL customer: {null_customers:,} ({null_pct:.2f}%)")
+    
+    print("\n" + "="*80)
+    print("DATABASE BUILD COMPLETE")
+    print("="*80)
+    print("\nNOTE: Missing D365 relationship:")
+    print("  Current: InventTrans -> SalesTable (direct join)")
+    print("  D365 Model: InventTrans -> SalesLine -> SalesTable")
+    print("  Impact: Cannot link to line-item details (price, line amounts)")
+    print("  See D365_DATA_MODEL.md for details")
+    
     con.close()
 
 

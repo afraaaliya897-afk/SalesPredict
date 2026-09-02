@@ -413,6 +413,15 @@ body {
 
 .chat-chart-card {
     margin-top: 12px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    padding: 16px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+    transition: box-shadow 0.2s ease;
+}
+
+.chat-chart-card:hover {
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
 }
 
 .forecast-model-bar {
@@ -504,16 +513,30 @@ body {
     color: #D97706;
 }
 
-.forecast-model-chip.seasonal_naive {
+.forecast-model-chip.seasonal_naive,
+.forecast-model-chip.seasonal_naive_yearly {
     border-left: 4px solid #7C3AED;
 }
 
-.forecast-model-chip.seasonal_naive .forecast-chip-wape {
+.forecast-model-chip.seasonal_naive .forecast-chip-wape,
+.forecast-model-chip.seasonal_naive_yearly .forecast-chip-wape {
     color: #7C3AED;
 }
 
-.forecast-model-chip.winner {
-    background: #f8fafc;
+.forecast-model-chip.ets {
+    border-left: 4px solid #0D9488;
+}
+
+.forecast-model-chip.ets .forecast-chip-wape {
+    color: #0D9488;
+}
+
+.forecast-model-chip.baseline {
+    opacity: 0.92;
+}
+
+.forecast-model-chip.baseline .forecast-chip-meta {
+    color: #6b7280;
 }
 
 .forecast-model-chip.winner .forecast-chip-meta {
@@ -524,10 +547,115 @@ body {
     position: relative;
     height: 280px;
     width: 100%;
+    background: #FAFAFA;
+    border-radius: 6px;
+    padding: 12px;
+    opacity: 0;
+    animation: chartFadeIn 0.4s ease-out 0.1s forwards;
+}
+
+@keyframes chartFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .chat-chart-wrap.forecast {
-    height: 380px;
+    height: 420px;
+    background: #ffffff;
+}
+
+.chat-chart-wrap.pie {
+    height: 400px;
+    padding: 8px 12px 8px 8px;
+    background: #ffffff;
+}
+
+.planning-heading {
+    margin-bottom: 10px;
+}
+
+.planning-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #111827;
+}
+
+.planning-caption {
+    margin-top: 3px;
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.planning-table-caption {
+    margin: 14px 0 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+}
+
+.planning-table-wrap {
+    margin-top: 0;
+}
+
+.planning-table th,
+.planning-table td {
+    white-space: nowrap;
+}
+
+.planning-table thead th.num,
+.planning-table td.num {
+    text-align: right;
+}
+
+.planning-table tbody th {
+    text-align: left;
+    font-weight: 600;
+    color: #374151;
+    background: #fff;
+    position: sticky;
+    left: 0;
+    z-index: 1;
+}
+
+.planning-table .yoy-up {
+    color: #047857;
+    font-weight: 600;
+}
+
+.planning-table .yoy-down {
+    color: #b45309;
+    font-weight: 600;
+}
+
+.planning-insights {
+    margin: 12px 0 4px;
+    padding-left: 18px;
+    color: #4b5563;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.planning-insights-title {
+    margin: 14px 0 0;
+    color: #111827;
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.planning-insights-title + .planning-insights {
+    margin-top: 6px;
+}
+
+.planning-insights li + li {
+    margin-top: 6px;
 }
 
 @media (max-width: 720px) {
@@ -636,11 +764,37 @@ body {
     border-top: 1px solid var(--border);
 }
 
+.chat-composer {
+    max-width: 900px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.model-picker {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.model-picker select {
+    min-width: 240px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: inherit;
+}
+
 .chat-input {
     display: flex;
     gap: 12px;
-    max-width: 900px;
-    margin: 0 auto;
 }
 
 .chat-input input {
@@ -1066,4 +1220,32 @@ body {
 .breakdown-card canvas {
     height: 300px !important;
     max-height: 300px !important;
+}
+
+/* View SQL Button */
+.view-sql-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    font-family: inherit;
+}
+
+.view-sql-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-color: var(--primary);
+}
+
+.view-sql-btn svg {
+    flex-shrink: 0;
 }

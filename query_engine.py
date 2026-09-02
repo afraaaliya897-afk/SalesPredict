@@ -1,38 +1,43 @@
 """
-Generalized query engine for sales-order + inventory-transaction chat.
+Sales chat query engine.
 
-The LLM never writes SQL. It fills a small fixed plan; this module validates
-that plan against allowlists and compiles it with one SQL template.
-
-Config at the top — two values are still unconfirmed against real data:
-  REFERENCE_SALES_ORDER_VALUE  — Reference field value that means "this row
-                                 came from a sales order"
-  SALE_DATE_FIELD              — which inventory date is "the sale happened on"
-
-Requires: duckdb, ollama, pandas
+Chat path: the LLM writes DuckDB SQL against v_orders / v_sold (see text_to_sql.py).
+Eval path: pass an injected plan to keep the old compiler for tests.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta
+import threading
+from calendar import monthrange
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
-import ollama
 import pandas as pd
+
+from llm_router import call_llm, list_available_models, resolve_model as resolve_model_router
 
 # ---------------------------------------------------------------------------
 # Config — change these in one place once real data is confirmed
 # ---------------------------------------------------------------------------
 
 DB_PATH = str(Path(__file__).resolve().parent / "sales_inventory.duckdb")
+PARALLEL_COMPARISON_PATH = Path(__file__).resolve().parent / "parallel_comparison_log.jsonl"
 
-# Ollama model for query planning. deepseek-r1:14b ran 100% CPU on this
-# machine (no NVIDIA GPU) and took ~157s; with think disabled it returned
-# empty JSON. llama3.2:3b is the local model that can plan in a few seconds.
+# Default model (will be resolved by llm_router)
 MODEL = "llama3.2:3b"
+
+
+def list_chat_models() -> list[dict]:
+    """Get list of all available chat models from llm_router."""
+    return list_available_models()
+
+
+def resolve_model(requested: str | None) -> str:
+    """Resolve requested model to an available model."""
+    return resolve_model_router(requested)
 
 # Exact string in inventory_transaction.reference that means "from a sales order".
 # Source column name in exports is typically "Reference".
@@ -262,8 +267,9 @@ def _empty_plan(**overrides) -> dict:
     return plan
 
 
-def _llm_query_plan(question: str, db_path: str = DB_PATH) -> dict:
+def _llm_query_plan(question: str, db_path: str = DB_PATH, model: str | None = None) -> dict:
     """LLM fills period tokens only. It does not compute SQL dates."""
+    chosen_model = resolve_model(model)
     as_of = get_max_sale_date(db_path)
     as_of_s = _as_datetime(as_of).date().isoformat() if as_of is not None else "unknown"
     system = (
@@ -272,25 +278,25 @@ def _llm_query_plan(question: str, db_path: str = DB_PATH) -> dict:
         "this_month / last_month / last_n_months are relative to that date, not today's clock. "
         "Never put calendar dates in the JSON. Python will compute the SQL date filter from your period token."
     )
-    kwargs = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ],
-        "options": {"temperature": 0.0, "num_predict": 256},
-        "format": "json",
-    }
-    started = datetime.utcnow()
+    
     try:
-        response = ollama.chat(**kwargs)
-    except TypeError:
-        kwargs.pop("format", None)
-        response = ollama.chat(**kwargs)
-
-    elapsed_ms = round((datetime.utcnow() - started).total_seconds() * 1000, 1)
-    print(f"LLM plan {MODEL}: {elapsed_ms} ms")
-    raw = response["message"]["content"].strip()
+        response = call_llm(
+            model=chosen_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": question},
+            ],
+            temperature=0.0,
+            max_tokens=256,
+            format_json=True,
+        )
+        elapsed_ms = response["llm_ms"]
+        print(f"LLM plan {chosen_model}: {elapsed_ms} ms")
+        raw = response["content"]
+    except Exception as e:
+        print(f"LLM plan failed: {e}")
+        return _empty_plan(_raw=str(e), _source="llm_error", _llm_ms=0)
+    
     try:
         plan = _extract_json(raw)
     except (json.JSONDecodeError, TypeError):
@@ -585,25 +591,31 @@ def execute(sql: str, params=None, db_path: str = DB_PATH) -> pd.DataFrame:
     return df
 
 
-def explain_result(question: str, plan: dict, df: pd.DataFrame) -> str:
+def explain_result(question: str, plan: dict, df: pd.DataFrame, model: str | None = None) -> str:
+    chosen_model = resolve_model(model)
     result_text = df.to_string(index=False) if len(df) else "(no rows returned)"
-    response = ollama.chat(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": EXPLAIN_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Question: {question}\n"
-                    f"Metric: {plan.get('metric')}\n"
-                    f"Dimension: {plan.get('dimension')}\n\n"
-                    f"Result:\n{result_text}"
-                ),
-            },
-        ],
-        options={"temperature": 0.0},
-    )
-    return response["message"]["content"].strip()
+    
+    try:
+        response = call_llm(
+            model=chosen_model,
+            messages=[
+                {"role": "system", "content": EXPLAIN_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Question: {question}\n"
+                        f"Metric: {plan.get('metric')}\n"
+                        f"Dimension: {plan.get('dimension')}\n\n"
+                        f"Result:\n{result_text}"
+                    ),
+                },
+            ],
+            temperature=0.0,
+        )
+        return response["content"]
+    except Exception as e:
+        print(f"LLM explain failed: {e}")
+        return _fallback_answer(question, plan, df)
 
 
 def _fallback_answer(question: str, plan: dict, df: pd.DataFrame) -> str:
@@ -667,10 +679,272 @@ def _log_forecast(question: str, plan: dict, forecast_result: dict, chart_data: 
         print(f"Could not write forecast log: {exc}")
 
 
+_MONTH_ALIASES = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def _parse_iso_date(value) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _month_end(year: int, month: int) -> date:
+    return date(year, month, monthrange(year, month)[1])
+
+
+def _as_of_from_db(db_path: str) -> date:
+    try:
+        con = duckdb.connect(db_path, read_only=True)
+        try:
+            (latest,) = con.execute("SELECT MAX(sale_date) FROM v_sold").fetchone()
+        finally:
+            con.close()
+        parsed = _parse_iso_date(latest)
+        if parsed:
+            return parsed
+    except Exception:
+        pass
+    return date.today()
+
+
+def _parse_named_month_range(question: str, as_of: date) -> tuple[date | None, date | None, str | None]:
+    """Fallback if the LLM omits dates: pick named months from the question."""
+    names = "|".join(sorted(_MONTH_ALIASES, key=len, reverse=True))
+    q = question.lower()
+    ranged = re.search(
+        rf"({names})\s*(?:to|-|through|until|and)\s*({names})(?:\s+(\d{{4}}))?",
+        q,
+    )
+    if ranged:
+        m1, m2 = _MONTH_ALIASES[ranged.group(1)], _MONTH_ALIASES[ranged.group(2)]
+        year = int(ranged.group(3)) if ranged.group(3) else as_of.year
+        y2 = year + 1 if m2 < m1 and not ranged.group(3) else year
+        return date(year, m1, 1), _month_end(y2, m2), "month"
+    single = re.search(rf"({names})\s+(\d{{4}})", q)
+    if single:
+        month = _MONTH_ALIASES[single.group(1)]
+        year = int(single.group(2))
+        return date(year, month, 1), _month_end(year, month), "month"
+    return None, None, None
+
+
+def _extract_relative_forecast_span(question: str) -> tuple[int | None, str | None]:
+    """Relative spans like 'next 30 days' — only used if no calendar window is given."""
+    question_lower = question.lower()
+    patterns = [
+        (r"(\d+)\s*day", "day"),
+        (r"(\d+)\s*week", "week"),
+        (r"(\d+)\s*month", "month"),
+        (r"(\d+)\s*quarter", "quarter"),
+        (r"next\s*year", "year"),
+    ]
+    for pattern, unit in patterns:
+        match = re.search(pattern, question_lower)
+        if not match:
+            continue
+        if unit == "year":
+            return 365, "month"
+        number = int(match.group(1))
+        if unit == "day":
+            return number, "day" if number <= 90 else "week"
+        if unit == "week":
+            return number * 7, "week" if number <= 12 else "month"
+        if unit == "month":
+            return number * 30, "month"
+        if unit == "quarter":
+            return number * 90, "month"
+    if "next month" in question_lower:
+        return 30, "day"
+    if "next quarter" in question_lower:
+        return 90, "month"
+    if "next year" in question_lower:
+        return 365, "month"
+    return None, None
+
+
+def _resolve_forecast_window(question: str, llm_window: dict | None, as_of: date) -> dict:
+    """Build the forecast window from the LLM reply, then fall back to the question text."""
+    start = end = None
+    grain = None
+    source = "default"
+
+    if llm_window:
+        start = _parse_iso_date(llm_window.get("start"))
+        end = _parse_iso_date(llm_window.get("end"))
+        grain = llm_window.get("grain")
+        if start and end:
+            source = "llm"
+
+    if not (start and end):
+        start, end, parsed_grain = _parse_named_month_range(question, as_of)
+        if start and end:
+            grain = grain or parsed_grain
+            source = "question_months"
+
+    question_l = (question or "").lower()
+    if not (start and end) and re.search(r"\bnext month\b", question_l) and not re.search(r"\bnext\s+\d+\s+months?\b", question_l):
+        if as_of.month == 12:
+            start = date(as_of.year + 1, 1, 1)
+        else:
+            start = date(as_of.year, as_of.month + 1, 1)
+        end = date(start.year, start.month, monthrange(start.year, start.month)[1])
+        grain = grain or "month"
+        source = "next_calendar_month"
+
+    if not (start and end):
+        days, rel_grain = _extract_relative_forecast_span(question)
+        if days:
+            start = as_of + timedelta(days=1)
+            end = as_of + timedelta(days=days)
+            grain = grain or rel_grain
+            source = "question_relative"
+
+    if not (start and end):
+        start = as_of + timedelta(days=1)
+        end = as_of + timedelta(days=365)
+        grain = grain or "month"
+        source = "default"
+
+    if end < start:
+        start, end = end, start
+
+    if grain not in ("day", "week", "month"):
+        grain = "day" if (end - start).days <= 90 else "month"
+
+    days_ahead = max(1, (end - as_of).days)
+    return {
+        "start": start,
+        "end": end,
+        "grain": grain,
+        "days_ahead": days_ahead,
+        "source": source,
+    }
+
+
+def _clip_chart_to_window(chart_data: dict, start: date, end: date) -> dict:
+    """Keep only the dates the user asked for."""
+    labels = chart_data.get("labels") or []
+    start_s, end_s = start.isoformat(), end.isoformat()
+    start_m, end_m = start.strftime("%Y-%m"), end.strftime("%Y-%m")
+
+    keep = []
+    for lab in labels:
+        token = str(lab)
+        if re.match(r"^\d{4}-\d{2}$", token):
+            keep.append(start_m <= token <= end_m)
+        else:
+            keep.append(start_s <= token[:10] <= end_s)
+
+    if not any(keep):
+        return chart_data
+
+    def clip(arr):
+        if not arr:
+            return arr
+        return [arr[i] for i in range(len(arr)) if i < len(keep) and keep[i]]
+
+    chart_data["labels"] = clip(labels)
+    for key in ("historical", "forecast", "lower", "upper"):
+        if key in chart_data:
+            chart_data[key] = clip(chart_data[key])
+    for model in chart_data.get("models") or []:
+        for key in ("forecast", "lower", "upper"):
+            if key in model:
+                model[key] = clip(model[key])
+    if chart_data.get("grain") == "month":
+        hist = chart_data.get("historical") or []
+        fc = chart_data.get("forecast") or []
+        chart_data["history_months"] = sum(1 for v in hist if v is not None)
+        chart_data["forecast_months"] = sum(1 for v in fc if v is not None)
+    return chart_data
+
+
+def _rank_limit_from_question(question: str) -> int:
+    match = re.search(r"\btop\s+(\d+)\b", question or "", re.I)
+    if match:
+        return max(1, min(15, int(match.group(1))))
+    return 5
+
+
+def _handle_item_rank_forecast(question: str, window: dict, plan: dict, debug: dict) -> dict:
+    from forecast_service import forecast_item_ranking
+    from text_to_sql import is_item_rank_forecast
+
+    if not is_item_rank_forecast(question):
+        return None
+    ranked = forecast_item_ranking(window["start"], window["end"], limit=_rank_limit_from_question(question))
+    items = ranked.get("items") or []
+    if window["start"].strftime("%Y-%m") == window["end"].strftime("%Y-%m"):
+        period = window["start"].strftime("%b %Y")
+    else:
+        period = f"{window['start'].strftime('%b %Y')}–{window['end'].strftime('%b %Y')}"
+    debug["forecast_config"] = {
+        "style": "item_rank",
+        "start": window["start"].isoformat(),
+        "end": window["end"].isoformat(),
+        "model": ranked.get("model"),
+        "prior_start": ranked.get("prior_start"),
+        "prior_end": ranked.get("prior_end"),
+    }
+    if not items:
+        return {
+            "answer_text": (
+                f"No item-level history for the same period last year "
+                f"({ranked.get('prior_start')} to {ranked.get('prior_end')}), so I cannot forecast {period}."
+            ),
+            "chart_type": None,
+            "chart_data": {"labels": [], "values": []},
+            "table_data": [],
+            "plan_used": {**plan, "forecast_start": window["start"].isoformat(), "forecast_end": window["end"].isoformat()},
+            "debug": debug,
+        }
+    top = items[0]
+    answer_text = (
+        f"For {period}, {top['item_number']} sold the most in the same period last year "
+        f"({ranked.get('prior_start')} to {ranked.get('prior_end')}): "
+        f"{top['forecast_qty']:,.0f} units. "
+        f"That is a straight replay of history ({ranked['method']}) — not a growth forecast "
+        f"and not invented by the chat model."
+    )
+    return {
+        "answer_text": answer_text,
+        "chart_type": "bar",
+        "chart_data": {
+            "labels": [row["item_number"] for row in items],
+            "values": [row["forecast_qty"] for row in items],
+        },
+        "table_data": [
+            {"item_number": row["item_number"], "forecast_qty": row["forecast_qty"]}
+            for row in items
+        ],
+        "plan_used": {
+            **plan,
+            "forecast_start": window["start"].isoformat(),
+            "forecast_end": window["end"].isoformat(),
+            "model": ranked.get("model"),
+        },
+        "metric_label": "Forecast units",
+        "dimension_label": "Item",
+        "debug": debug,
+    }
+
+
 def _handle_forecast(question: str, plan: dict, debug: dict, skip_llm_explain: bool = False) -> dict:
     """Handle forecast requests using forecast_service."""
     try:
-        from forecast_service import FORECAST_MODEL_IDS, build_monthly_chart, generate_forecast
+        from forecast_service import (
+            build_demand_planning_view,
+            generate_forecast,
+            resolve_forecast_item,
+        )
     except ImportError:
         return {
             "answer_text": "Forecasting module not available. Please install Prophet: pip install prophet",
@@ -681,18 +955,52 @@ def _handle_forecast(question: str, plan: dict, debug: dict, skip_llm_explain: b
             "debug": debug,
         }
 
-    days_back = plan.get("date_range_days") or 365
-    days_ahead = plan.get("limit") or 365
-    use_monthly = days_ahead >= 180
+    as_of = _as_of_from_db(DB_PATH)
+    window = _resolve_forecast_window(question, plan.get("forecast_window"), as_of)
+    ranked = _handle_item_rank_forecast(question, window, plan, debug)
+    if ranked is not None:
+        return ranked
+    llm_item = (plan.get("forecast_window") or {}).get("item")
+    scope = resolve_forecast_item(question, llm_item)
+    if scope.get("error"):
+        return {
+            "answer_text": scope["error"],
+            "chart_type": None,
+            "chart_data": {"labels": [], "values": []},
+            "table_data": [],
+            "plan_used": plan,
+            "debug": {**debug, "forecast_scope": scope},
+        }
+
+    days_back = None
+    days_ahead = window["days_ahead"]
+    grain = window["grain"]
+    use_monthly = grain == "month" or (window["end"] - window["start"]).days > 90
+    item_number = scope.get("item_number")
+    scope_label = scope.get("label") or "all sold items"
 
     debug["forecast_config"] = {
-        "days_back": days_back,
+        "as_of": as_of.isoformat(),
+        "start": window["start"].isoformat(),
+        "end": window["end"].isoformat(),
+        "days_back": "all_available",
         "days_ahead": days_ahead,
-        "grain": "month" if use_monthly else "day",
+        "grain": grain,
+        "window_source": window["source"],
+        "item_number": item_number,
+        "scope": scope_label,
     }
 
     try:
-        forecast_result = generate_forecast(days_back=days_back, days_ahead=days_ahead)
+        forecast_result = generate_forecast(
+            days_back=days_back,
+            days_ahead=days_ahead,
+            horizon="month" if use_monthly else "day",
+            item_number=item_number,
+        )
+        debug["forecast_config"]["history_start"] = forecast_result.get("history_start")
+        debug["forecast_config"]["history_end"] = forecast_result.get("history_end")
+        debug["forecast_config"]["history_days"] = forecast_result.get("history_days")
 
         if "error" in forecast_result:
             return {
@@ -711,65 +1019,84 @@ def _handle_forecast(question: str, plan: dict, debug: dict, skip_llm_explain: b
         selection = forecast_result.get("selection") or ""
         model_forecasts = forecast_result.get("model_forecasts") or {model: forecast}
 
-        if use_monthly:
-            chart_data = build_monthly_chart({"historical": historical, "forecast": forecast})
-            monthly_vals = [v for v in chart_data.get("forecast") or [] if v is not None]
-            avg_forecast = sum(monthly_vals) / len(monthly_vals) if monthly_vals else 0
-            grain_text = (
-                f"Predicted average: {avg_forecast:.0f} units/month over the next "
-                f"{chart_data.get('forecast_months', 12)} months, "
-                f"using {chart_data.get('history_months', 12)} months of history. "
-            )
-            metric_label = "Quantity (units/month)"
-        else:
-            chart_data = _daily_forecast_chart(historical, forecast)
-            avg_forecast = sum(row["quantity"] for row in forecast) / len(forecast) if forecast else 0
-            grain_text = (
-                f"Predicted average: {avg_forecast:.1f} units/day for the next {days_ahead} days, "
-                f"using {len(historical)} days of history. "
-            )
-            metric_label = "Quantity (units/day)"
-
-        models = []
+        winner_wape = None
         for c in candidates:
-            name = c.get("name")
+            if c.get("name") == model and c.get("wape") is not None:
+                winner_wape = c["wape"]
+                break
+
+        chart_data = build_demand_planning_view(
+            historical,
+            forecast,
+            window["start"],
+            window["end"],
+            grain="month" if use_monthly else "day",
+            model=model,
+            selection=selection,
+            wape=winner_wape,
+        )
+        models = []
+        winner_id = None
+        for candidate in candidates:
+            name = candidate.get("name")
             rows = model_forecasts.get(name)
             if not rows:
                 continue
-            series = (
-                build_monthly_chart({"historical": historical, "forecast": rows})
-                if use_monthly
-                else _daily_forecast_chart(historical, rows)
+            series = build_demand_planning_view(
+                historical,
+                rows,
+                window["start"],
+                window["end"],
+                grain="month" if use_monthly else "day",
+                model=name,
             )
+            model_id = candidate.get("id") or name
+            is_winner = name == model
+            if is_winner:
+                winner_id = model_id
             models.append({
-                "id": c.get("id") or FORECAST_MODEL_IDS.get(name, name),
+                "id": model_id,
                 "name": name,
-                "wape": c.get("wape"),
-                "winner": name == model,
+                "wape": candidate.get("wape"),
+                "winner": is_winner,
+                "baseline": bool(candidate.get("baseline")),
                 "forecast": series.get("forecast") or [],
                 "lower": series.get("lower") or [],
                 "upper": series.get("upper") or [],
+                "yoy": series.get("yoy_labels") or [],
+                "peak": series.get("peak"),
+                "forecast_label": series.get("forecast_label"),
+                "table_forecast_label": (series.get("planning_table") or {}).get("forecast_label"),
             })
 
         chart_data["model"] = model
         chart_data["selection"] = selection
         chart_data["candidates"] = candidates
         chart_data["models"] = models
-        chart_data["view"] = "all"
+        chart_data["view"] = winner_id or "all"
+        chart_data["scope_label"] = scope_label
+        chart_data["item_number"] = item_number
 
-        score_bits = []
-        for c in candidates:
-            wape = c.get("wape")
-            mark = " (best)" if c.get("name") == model else ""
-            if wape is None:
-                score_bits.append(f"{c['name']}: n/a{mark}")
-            else:
-                score_bits.append(f"{c['name']}: {wape:.1%} WAPE{mark}")
-        scores_text = "; ".join(score_bits)
+        period_label = f"{window['start'].strftime('%b %Y')}–{window['end'].strftime('%b %Y')}"
+        metric_label = "Units per month" if chart_data.get("grain") == "month" else "Units per day"
+
+        fc_vals = [v for v in chart_data.get("forecast") or [] if v is not None]
+        avg_forecast = sum(fc_vals) / len(fc_vals) if fc_vals else 0
+        hist_start = forecast_result.get("history_start")
+        hist_end = forecast_result.get("history_end")
+        history_span = ""
+        if hist_start and hist_end:
+            history_span = f" from {hist_start[:7]} through {hist_end[:7]}"
+
+        model_label = chart_data.get("forecast_label") or model
+        wape_bit = f" Holdout WAPE {winner_wape:.0%}." if winner_wape is not None else ""
+        drivers = chart_data.get("drivers") or []
+        why_bit = " ".join(drivers[:3]) if drivers else ""
         answer_text = (
-            f"All three models are on the chart. Best backtest: {model} ({selection}). "
-            f"{grain_text}"
-            f"Click a model to focus it. Backtest: {scores_text}."
+            f"Forecast for {scope_label} ({period_label}): {model_label}.{wape_bit} "
+            f"Fitted on sold units{history_span}. {selection}. "
+            f"Gray = same months last year (comparison only)."
+            + (f" Why up/down: {why_bit}" if why_bit else "")
         )
 
         debug["forecast_summary"] = {
@@ -780,6 +1107,10 @@ def _handle_forecast(question: str, plan: dict, debug: dict, skip_llm_explain: b
             "forecast_days": len(forecast),
             "avg_forecast": round(avg_forecast, 2),
             "grain": chart_data.get("grain"),
+            "style": "demand_planning",
+            "peak": chart_data.get("peak"),
+            "item_number": item_number,
+            "scope": scope_label,
         }
 
         if not skip_llm_explain:
@@ -789,8 +1120,16 @@ def _handle_forecast(question: str, plan: dict, debug: dict, skip_llm_explain: b
             "answer_text": answer_text,
             "chart_type": "forecast",
             "chart_data": chart_data,
-            "table_data": _forecast_table_payload(chart_data, forecast, view="all"),
-            "plan_used": plan,
+            "table_data": _planning_table_payload(chart_data),
+            "plan_used": {
+                **plan,
+                "forecast_start": window["start"].isoformat(),
+                "forecast_end": window["end"].isoformat(),
+                "grain": grain,
+                "days_ahead": days_ahead,
+                "window_source": window["source"],
+                "item_number": item_number,
+            },
             "metric_label": metric_label,
             "dimension_label": "Date",
             "debug": debug,
@@ -820,48 +1159,22 @@ def _daily_forecast_chart(historical: list, forecast: list) -> dict:
     }
 
 
-def _forecast_table_payload(chart_data: dict, daily_forecast: list, view: str = "all") -> list[dict]:
-    """One row per chart point so View as table matches the chart grain."""
-    labels = chart_data.get("labels") or []
-    hist = chart_data.get("historical") or []
-    models = chart_data.get("models") or []
+def _planning_table_payload(chart_data: dict) -> list[dict]:
+    """Transposed monthly detail: Actual / Forecast / YoY as rows, months as columns."""
+    table = chart_data.get("planning_table") or {}
+    columns = table.get("columns") or chart_data.get("labels") or []
+    actual = table.get("actual") or chart_data.get("actual") or []
+    forecast = table.get("forecast") or chart_data.get("forecast") or []
+    yoy = table.get("yoy") or chart_data.get("yoy_labels") or []
 
-    def _num(series, idx):
-        if idx >= len(series):
-            return None
-        val = series[idx]
-        if val is None:
-            return None
-        return round(float(val), 1)
+    def _cells(series):
+        return {str(columns[i]): (series[i] if i < len(series) else None) for i in range(len(columns))}
 
-    if labels and (chart_data.get("grain") == "month" or models):
-        focused = next((m for m in models if m.get("id") == view), None) if view and view != "all" else None
-        rows = []
-        for i, label in enumerate(labels):
-            row = {"date": str(label), "actual": _num(hist, i)}
-            if focused:
-                row["quantity"] = _num(focused.get("forecast") or [], i)
-                row["lower"] = _num(focused.get("lower") or [], i)
-                row["upper"] = _num(focused.get("upper") or [], i)
-            elif models:
-                for m in models:
-                    row[m.get("id") or m.get("name")] = _num(m.get("forecast") or [], i)
-            else:
-                row["quantity"] = _num(chart_data.get("forecast") or [], i)
-                row["lower"] = _num(chart_data.get("lower") or [], i)
-                row["upper"] = _num(chart_data.get("upper") or [], i)
-            rows.append(row)
-        return rows
-
-    rows = []
-    for row in daily_forecast or []:
-        rows.append({
-            "date": _iso_date(row.get("date")),
-            "quantity": round(float(row.get("quantity") or 0), 1),
-            "lower": round(float(row.get("lower") or 0), 1),
-            "upper": round(float(row.get("upper") or 0), 1),
-        })
-    return rows
+    return [
+        {"metric": table.get("actual_label") or "Actual", **_cells(actual)},
+        {"metric": table.get("forecast_label") or "Forecast", **_cells(forecast)},
+        {"metric": "YoY change", **_cells(yoy)},
+    ]
 
 
 def _chart_payload(df: pd.DataFrame) -> dict:
@@ -905,17 +1218,548 @@ def _table_payload(plan: dict, df: pd.DataFrame) -> list[dict]:
     return rows
 
 
+def _infer_smart_chart_type(
+    df: pd.DataFrame, 
+    label_col: str = None, 
+    metric_col: str = None, 
+    question: str = None,
+    chart_hint: str = None
+) -> str:
+    """Intelligently select chart type based on data characteristics and LLM suggestion.
+    
+    Priority order:
+    1. LLM's chart_hint (if provided and valid)
+    2. Data shape heuristics (date columns, row count, etc.)
+    """
+    # Priority 1: Use LLM's suggestion if provided
+    if chart_hint and chart_hint in ['pie', 'bar', 'line', 'stat']:
+        # Validate that the hint makes sense for the data
+        if chart_hint == 'pie' and 2 <= len(df) <= 10:
+            return 'pie'
+        elif chart_hint == 'stat' and len(df) == 1 and not label_col:
+            return 'stat'
+        elif chart_hint == 'line' and len(df) >= 2:
+            return 'line'
+        elif chart_hint == 'bar' and len(df) >= 2:
+            return 'bar'
+        # If hint doesn't match data, fall through to heuristics
+    
+    # Priority 2: Data shape heuristics
+    if df is None or len(df) == 0:
+        return "stat"
+
+    # Single number with no category (item, customer, …) = stat card
+    if len(df) == 1 and not label_col:
+        return "stat"
+
+    # Check if we have date-like column
+    dateish = [
+        c for c in df.columns
+        if "date" in str(c).lower() or pd.api.types.is_datetime64_any_dtype(df[c])
+    ]
+
+    # Time series data = line chart
+    if dateish and len(df) >= 3:
+        return "line"
+
+    # Few items (2-15) = bar chart
+    if 2 <= len(df) <= 15:
+        return "bar"
+
+    # Many items (>15) but not time series = bar (truncated) or line
+    if len(df) > 15:
+        # If it's ordered/ranked data, keep as bar (will be truncated)
+        # If it's dense continuous data, use line
+        if dateish:
+            return "line"
+        return "bar"
+
+    return "bar"  # Default fallback
+
+
+_TRAILING_JUNK_RE = re.compile(r"[\s\-–—]+$")
+
+
+def _clean_str(value: str) -> str:
+    """Trim the trailing ' -' left over from D365 name exports (e.g. 'Oliver -').
+
+    Display-only cleanup — the dash carries no data (nothing ever follows it
+    in the source export), so this never removes real information.
+    """
+    cleaned = _TRAILING_JUNK_RE.sub("", value.strip()).strip()
+    return cleaned or value
+
+
+def _payloads_from_sql_df(df: pd.DataFrame, question: str = None, chart_hint: str = None) -> tuple[dict, list, str, str, str | None, bool]:
+    """Turn a free-form SQL result into chart/table payloads.
+    Returns: (chart_data, table_data, chart_type, metric_label, dim_label, chart_truncated)
+    """
+    if df is None or len(df) == 0:
+        return {"labels": [], "values": []}, [], "stat", "Value", None, False
+
+    table = []
+    for _, row in df.iterrows():
+        item: dict = {}
+        for col in df.columns:
+            val = row[col]
+            if pd.isna(val):
+                item[col] = None
+            elif hasattr(val, "strftime"):
+                item[col] = val.strftime("%Y-%m-%d")
+            elif isinstance(val, str):
+                item[col] = _clean_str(val)
+            elif hasattr(val, "item"):
+                item[col] = val.item()
+            else:
+                item[col] = val
+        table.append(item)
+
+    numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    dateish = [
+        c for c in df.columns
+        if "date" in str(c).lower() or pd.api.types.is_datetime64_any_dtype(df[c])
+    ]
+    metric_label = str(numeric[0]) if numeric else "Value"
+
+    # Bare total only when the result has no item/customer/site to show.
+    # "Top product" is LIMIT 1 with item_number + qty — keep the item.
+    if len(df) == 1 and numeric:
+        label_cols = [c for c in df.columns if c not in numeric]
+        if not label_cols:
+            val = df.iloc[0][numeric[0]]
+            metric = None if pd.isna(val) else float(val)
+            return (
+                {"labels": [], "values": []},
+                [{"metric_value": metric}],
+                "stat",
+                metric_label,
+                None,
+                False,
+            )
+
+    label_col = None
+    if dateish:
+        label_col = dateish[0]
+    else:
+        non_num = [c for c in df.columns if c not in numeric]
+        if non_num and numeric:
+            label_col = non_num[0]
+
+    # Smart chart type inference with question context
+    value_col = numeric[0] if numeric else None
+    chart_type = _infer_smart_chart_type(df, label_col, value_col, question, chart_hint)
+
+    chart_truncated = False
+    if label_col and numeric:
+        # Auto-limit bar/pie charts to reasonable size
+        max_items = 15 if chart_type in ["bar", "pie"] else len(df)
+        if len(df) > max_items:
+            df_chart = df.head(max_items)
+            chart_truncated = True
+        else:
+            df_chart = df
+        
+        labels = []
+        values = []
+        for _, row in df_chart.iterrows():
+            lab = row[label_col]
+            if hasattr(lab, "strftime"):
+                labels.append(lab.strftime("%Y-%m-%d"))
+            elif isinstance(lab, str):
+                labels.append(_clean_str(lab))
+            else:
+                labels.append(str(lab))
+            val = row[numeric[0]]
+            values.append(None if pd.isna(val) else float(val))
+        
+        chart_data = {"labels": labels, "values": values}
+        
+        # Add chart-specific configuration
+        if chart_type == "pie":
+            chart_data["chartType"] = "pie"
+        elif chart_type == "line":
+            chart_data["chartType"] = "line"
+            chart_data["fill"] = True  # Area chart style
+        
+        return chart_data, table, chart_type, metric_label, str(label_col), chart_truncated
+
+    return {"labels": [], "values": []}, table, "stat", metric_label, None, False
+
+
+def _validate_answer(answer: str, df: pd.DataFrame) -> bool:
+    """Validate that answer doesn't hallucinate values not in the data."""
+    if df is None or len(df) == 0:
+        return True  # Empty data is fine
+    
+    # Extract all numbers from the answer (formatted with commas)
+    answer_numbers = set()
+    for match in re.finditer(r'[\d,]+', answer):
+        num_str = match.group().replace(',', '')
+        if num_str.isdigit():
+            answer_numbers.add(int(num_str))
+    
+    # Extract all numbers from the dataframe
+    data_numbers = set()
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            for val in df[col].dropna():
+                if pd.notna(val):
+                    data_numbers.add(int(float(val)))
+    
+    # Check if answer contains numbers not in data (allowing row count)
+    hallucinated = answer_numbers - data_numbers - {len(df)}
+    
+    # Allow small numbers that might be counts or indices
+    hallucinated = {n for n in hallucinated if n > 10}
+    
+    return len(hallucinated) == 0
+
+
+def _sql_answer_text(df: pd.DataFrame, question: str, model: str) -> str:
+    """Generate natural language answer from SQL results using LLM."""
+    if df is None or len(df) == 0:
+        return "There is no matching data for that question."
+    
+    # Format the result data for the LLM
+    if len(df) <= 10:
+        result_text = df.to_string(index=False)
+    else:
+        result_text = df.head(10).to_string(index=False) + f"\n... ({len(df)} total rows)"
+    
+    # Let the LLM format the answer
+    system = """You are explaining query results to a business user.
+
+Given a question and the data that answers it, write a clear, concise answer in 1-2 sentences.
+
+CRITICAL RULES TO PREVENT HALLUCINATIONS:
+1. ONLY use numbers that appear in the Data section below
+2. NEVER calculate, infer, or estimate values not shown
+3. If Data shows "ITEM-123", write "ITEM-123" (use exact values)
+4. If Data shows a number like 1234, format it as "1,234" with commas
+5. If asked for "top N" but Data shows fewer, mention all that exist
+6. NEVER add context like "in Q1" or "this month" unless the question explicitly mentions it
+7. For single numbers, state the metric clearly: "Total sales: 1,234 units"
+8. For lists/rankings, mention all shown items with their values
+9. If Data is empty or shows 0, say "No data available for that period"
+10. NEVER make up item names, customer names, or any values
+
+Examples:
+Q: which item sold the most last month?
+Data: 
+item_number  total
+ITEM-A       1189
+A: ITEM-A sold the most with 1,189 units.
+
+Q: top 3 customers by orders
+Data:
+customer_name  orders
+Alice Corp     45
+Bob Inc        38
+Carol Ltd      31
+A: The top 3 customers are Alice Corp (45 orders), Bob Inc (38 orders), and Carol Ltd (31 orders).
+
+Q: total sales this month
+Data: 
+total
+15234
+A: Total sales: 15,234 units.
+
+Q: daily sales trend this week
+Data:
+sale_date    daily_total
+2024-01-15   450
+2024-01-16   523
+2024-01-17   489
+A: Daily sales ranged from 450 to 523 units between Jan 15-17, 2024.
+
+Q: sales last month
+Data:
+(no rows)
+A: No sales data available for that period."""
+    
+    try:
+        response = call_llm(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"Question: {question}\n\nData:\n{result_text}\n\nAnswer:"},
+            ],
+            temperature=0.0,
+            max_tokens=150,
+        )
+        answer = response["content"]
+        
+        # Validate answer against data to prevent hallucinations
+        if answer and not _validate_answer(answer, df):
+            # LLM hallucinated - fall back to simple format
+            if len(df) == 1 and len(df.columns) == 1:
+                val = df.iloc[0, 0]
+                return f"{df.columns[0]}: {float(val):,.0f}" if pd.notna(val) else f"{df.columns[0]}: —"
+            return f"Found {len(df)} results."
+        
+        return answer if answer else f"Found {len(df)} results."
+    except Exception as e:
+        print(f"LLM answer generation failed: {e}")
+        # Fallback to simple format if LLM fails
+        if len(df) == 1 and len(df.columns) == 1:
+            val = df.iloc[0, 0]
+            return f"{df.columns[0]}: {float(val):,.0f}" if pd.notna(val) else f"{df.columns[0]}: —"
+        return f"Found {len(df)} results."
+
+
+
+def _answer_with_sql(question: str, db_path: str, debug: dict, model: str) -> dict:
+    from text_to_sql import (
+        FORECAST_RE,
+        MAX_SQL_RETRIES,
+        UNSUPPORTED_RE,
+        apply_requested_limit,
+        check_sql,
+        enforce_limit,
+        generate_sql,
+        is_forecast_question,
+        log_sql_rejection,
+        remember_sql,
+        rewrite_sql_after_error,
+    )
+
+    if UNSUPPORTED_RE.search(question or ""):
+        return {
+            "answer_text": "I don't have data for that",
+            "chart_type": None,
+            "chart_data": {"labels": [], "values": []},
+            "table_data": [],
+            "plan_used": {"engine": "text_to_sql", "sql": "UNSUPPORTED"},
+            "debug": {**debug, "engine": "text_to_sql", "sql_guard": {"ok": False, "reason": "unsupported metric"}},
+        }
+
+    if is_forecast_question(question or ""):
+        plan = {
+            "metric": "forecast_sales",
+            "dimension": None,
+            "period": "requested",
+            "date_range_days": None,
+            "sort": "asc",
+            "limit": None,
+            "_source": "forecast_intent",
+            "forecast_window": None,
+        }
+        return _handle_forecast(question, plan, {**debug, "engine": "forecast", "query_plan": plan})
+
+    generated = generate_sql(question, model, db_path)
+    debug["engine"] = "text_to_sql"
+    debug["model"] = model
+    debug["llm_ms"] = generated.get("llm_ms")
+    debug["sql_raw"] = generated.get("raw")
+    chart_hint = generated.get("chart_hint")
+    extracted = generated.get("sql")
+
+    if extracted == "FORECAST" or FORECAST_RE.search(question or ""):
+        plan = {
+            "metric": "forecast_sales",
+            "dimension": None,
+            "period": "requested",
+            "date_range_days": None,
+            "sort": "asc",
+            "limit": None,
+            "_source": "llm_forecast" if extracted == "FORECAST" else "forecast_intent",
+            "forecast_window": generated.get("forecast_window"),
+        }
+        return _handle_forecast(question, plan, {**debug, "query_plan": plan})
+
+    if extracted == "UNSUPPORTED" or extracted is None:
+        log_sql_rejection(question, extracted, "unsupported or empty SQL from LLM")
+        return {
+            "answer_text": "I don't have data for that",
+            "chart_type": None,
+            "chart_data": {"labels": [], "values": []},
+            "table_data": [],
+            "plan_used": {"engine": "text_to_sql", "sql": extracted},
+            "debug": debug,
+        }
+
+    extracted = apply_requested_limit(extracted, question)
+
+    ok, reason = check_sql(extracted)
+    debug["sql_query"] = extracted
+    debug["sql_guard"] = {"ok": ok, "reason": reason}
+    if not ok:
+        print(f"SQL rejected: {reason}\n{extracted}")
+        log_sql_rejection(question, extracted, reason)
+        return {
+            "answer_text": "I couldn't safely answer that question (query validation failed).",
+            "chart_type": None,
+            "chart_data": {"labels": [], "values": []},
+            "table_data": [],
+            "plan_used": {"engine": "text_to_sql", "sql": extracted, "rejected": reason},
+            "debug": debug,
+        }
+
+    attempts = []
+    sql = enforce_limit(extracted)
+    debug["sql_query"] = sql
+    df = None
+    last_error = None
+    for attempt in range(MAX_SQL_RETRIES + 1):
+        try:
+            df = execute(sql, db_path=db_path)
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = str(exc)
+            attempts.append({"sql": sql, "error": last_error})
+            print(f"SQL execute failed (attempt {attempt + 1}): {last_error}")
+            if attempt >= MAX_SQL_RETRIES:
+                break
+            rewritten = rewrite_sql_after_error(question, extracted, last_error, model)
+            debug["llm_ms"] = (debug.get("llm_ms") or 0) + (rewritten.get("llm_ms") or 0)
+            extracted = rewritten.get("sql")
+            if extracted in (None, "FORECAST", "UNSUPPORTED"):
+                break
+            extracted = apply_requested_limit(extracted, question)
+            ok, reason = check_sql(extracted)
+            debug["sql_guard"] = {"ok": ok, "reason": reason}
+            if not ok:
+                print(f"SQL retry rejected: {reason}\n{extracted}")
+                log_sql_rejection(question, extracted, f"retry rejected: {reason}")
+                break
+            sql = enforce_limit(extracted)
+            debug["sql_query"] = sql
+
+    debug["sql_retries"] = attempts
+    if df is None:
+        debug["execution_error"] = last_error or "rewrite failed safety check"
+        log_sql_rejection(question, sql, last_error or "rewrite failed safety check")
+        return {
+            "answer_text": "I couldn't run that query against the loaded data.",
+            "chart_type": None,
+            "chart_data": {"labels": [], "values": []},
+            "table_data": [],
+            "plan_used": {"engine": "text_to_sql", "sql": sql, "retries": len(attempts)},
+            "debug": debug,
+        }
+
+    remember_sql(question, extracted)
+    chart_data, table_data, chart_type, metric_label, dim_label, chart_truncated = _payloads_from_sql_df(df, question, chart_hint)
+    debug["execution"] = {"rows_returned": int(len(df)), "columns": list(df.columns), "chart_truncated": chart_truncated}
+    
+    answer_text = _sql_answer_text(df, question, model)
+    if chart_truncated and answer_text:
+        answer_text += f" (Showing top 15 in chart; full {len(df)} results in table.)"
+    
+    return {
+        "answer_text": answer_text,
+        "chart_type": chart_type if (chart_data.get("labels") or chart_type == "stat") else None,
+        "chart_data": chart_data,
+        "table_data": table_data,
+        "plan_used": {"engine": "text_to_sql", "sql": sql},
+        "debug": debug,
+        "metric_label": metric_label,
+        "dimension_label": dim_label,
+    }
+
+
+def _topline_from_result(result: dict) -> str | None:
+    if not result:
+        return None
+    text = result.get("answer_text")
+    if text:
+        return str(text)[:500]
+    table = result.get("table_data") or []
+    if table:
+        return str(table[0])[:500]
+    return None
+
+
+def _run_old_engine_snapshot(question: str, db_path: str) -> dict | None:
+    """Best-effort plan-compiler snapshot for parallel comparison. Never raises to caller."""
+    try:
+        plan = get_query_plan(question, db_path=db_path)
+        ok, message = validate_plan(plan)
+        if not ok:
+            return {"ok": False, "reason": message, "plan": plan}
+        if plan.get("metric") == "forecast_sales":
+            return {
+                "ok": True,
+                "engine": "forecast",
+                "plan": plan,
+                "note": "forecast path — skipped SQL execute",
+            }
+        sql, params = build_sql(plan, db_path=db_path)
+        if not validate_sql(sql):
+            return {"ok": False, "reason": "validate_sql failed", "plan": plan, "sql": sql}
+        df = execute(sql, params, db_path=db_path)
+        chart_type = infer_chart_type(plan)
+        return {
+            "ok": True,
+            "plan": {
+                "metric": plan.get("metric"),
+                "dimension": plan.get("dimension"),
+                "period": plan.get("period"),
+                "date_range_days": plan.get("date_range_days"),
+                "limit": plan.get("limit"),
+            },
+            "sql": sql,
+            "chart_type": chart_type,
+            "rows": int(len(df)),
+            "answer_text": _fallback_answer(question, plan, df)[:500],
+            "table_head": df.head(3).to_dict(orient="records") if len(df) else [],
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+
+
+def _log_parallel_comparison(question: str, result: dict, db_path: str) -> None:
+    """Fire-and-forget comparison log. Failures never affect the user response."""
+
+    def _worker():
+        try:
+            plan_used = result.get("plan_used") or {}
+            new_sql = plan_used.get("sql") or (result.get("debug") or {}).get("sql_query")
+            row = {
+                "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "question": question,
+                "new_engine_sql": new_sql,
+                "new_engine_answer": _topline_from_result(result),
+                "new_engine_chart_type": result.get("chart_type"),
+                "old_engine_result": _run_old_engine_snapshot(question, db_path),
+                "note": (
+                    "Cross-check new_engine_* vs old_engine_result during Phase 2. "
+                    "Old engine uses get_query_plan+build_sql; disagreements are expected "
+                    "when the free-form SQL path is richer than the plan compiler."
+                ),
+            }
+            with PARALLEL_COMPARISON_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        except Exception as exc:
+            print(f"parallel_comparison_log skipped: {exc}")
+
+    try:
+        threading.Thread(target=_worker, daemon=True).start()
+    except Exception as exc:
+        print(f"parallel_comparison_log thread failed: {exc}")
+
+
 def answer_question(
     question: str,
     db_path: str = DB_PATH,
     plan: dict | None = None,
     skip_llm_explain: bool = False,
+    model: str | None = None,
 ) -> dict:
     """
-    Full pipeline. Pass `plan` to skip the LLM (tests). Returns the chat JSON shape.
+    Chat uses text-to-SQL. Pass `plan` to skip the LLM (eval / compiler tests).
     """
-    used_plan = plan if plan is not None else get_query_plan(question)
-    debug = {"query_plan": used_plan}
+    debug: dict = {}
+    chosen = resolve_model(model)
+    debug["model"] = chosen
+    if plan is None:
+        result = _answer_with_sql(question, db_path, debug, chosen)
+        _log_parallel_comparison(question, result, db_path)
+        return result
+
+    used_plan = plan
+    debug["query_plan"] = used_plan
 
     ok, message = validate_plan(used_plan)
     if not ok:

@@ -1,0 +1,190 @@
+{
+  "dataset": "SalesPrediction-SpiderBIRD-style",
+  "note": "Domain-adapted gold set. Not the official Spider/BIRD leaderboard corpora. Metrics follow Spider (EX, EM, difficulty) and BIRD (EX, Soft-F1, R-VES, evidence).",
+  "as_of_sold": "2026-08-25",
+  "as_of_orders": "2026-08-26",
+  "db": "sales_inventory.duckdb",
+  "examples": [
+    {
+      "id": "e1_total_units",
+      "question": "What is the total quantity sold?",
+      "gold_sql": "SELECT SUM(sold_qty) AS total FROM v_sold",
+      "spider_difficulty": "easy",
+      "bird_difficulty": "simple",
+      "ordered": false,
+      "evidence": "sold_qty in v_sold is already positive completed units."
+    },
+    {
+      "id": "e2_total_orders",
+      "question": "How many sales orders are there?",
+      "gold_sql": "SELECT COUNT(DISTINCT sales_order_number) AS orders FROM v_orders",
+      "spider_difficulty": "easy",
+      "bird_difficulty": "simple",
+      "ordered": false,
+      "evidence": "Count orders with COUNT(DISTINCT sales_order_number) on v_orders."
+    },
+    {
+      "id": "e3_unique_customers",
+      "question": "How many unique customers placed orders?",
+      "gold_sql": "SELECT COUNT(DISTINCT customer_name) AS customers FROM v_orders",
+      "spider_difficulty": "easy",
+      "bird_difficulty": "simple",
+      "ordered": false,
+      "evidence": null
+    },
+    {
+      "id": "e4_latest_sale",
+      "question": "What is the latest sale date?",
+      "gold_sql": "SELECT MAX(sale_date) AS latest FROM v_sold",
+      "spider_difficulty": "easy",
+      "bird_difficulty": "simple",
+      "ordered": false,
+      "evidence": "Use sale_date from v_sold, not wall-clock today."
+    },
+    {
+      "id": "m1_top5_items_90d",
+      "question": "top 5 items by quantity sold in the last 90 days",
+      "gold_sql": "SELECT item_number, SUM(sold_qty) AS total FROM v_sold WHERE sale_date >= DATE '2026-08-25' - INTERVAL 90 DAY GROUP BY 1 ORDER BY 2 DESC LIMIT 5",
+      "spider_difficulty": "medium",
+      "bird_difficulty": "moderate",
+      "ordered": true,
+      "evidence": "As-of date is 2026-08-25. Items live only on v_sold."
+    },
+    {
+      "id": "m2_orders_this_month",
+      "question": "total orders this month",
+      "gold_sql": "SELECT COUNT(DISTINCT sales_order_number) AS orders FROM v_orders WHERE invoice_date >= date_trunc('month', DATE '2026-08-26')",
+      "spider_difficulty": "medium",
+      "bird_difficulty": "moderate",
+      "ordered": false,
+      "evidence": "This month is relative to latest invoice_date 2026-08-26."
+    },
+    {
+      "id": "m3_daily_this_month",
+      "question": "daily sales trend this month",
+      "gold_sql": "SELECT sale_date, SUM(sold_qty) AS daily_total FROM v_sold WHERE sale_date >= date_trunc('month', DATE '2026-08-25') GROUP BY 1 ORDER BY 1",
+      "spider_difficulty": "medium",
+      "bird_difficulty": "moderate",
+      "ordered": true,
+      "evidence": "Daily trend uses v_sold.sale_date."
+    },
+    {
+      "id": "m4_top5_customers_qty",
+      "question": "top 5 customers by total quantity purchased",
+      "gold_sql": "SELECT customer_name, SUM(sold_qty) AS total FROM v_sold GROUP BY 1 ORDER BY 2 DESC LIMIT 5",
+      "spider_difficulty": "medium",
+      "bird_difficulty": "moderate",
+      "ordered": true,
+      "evidence": "Quantity is SUM(sold_qty) from v_sold, not order count."
+    },
+    {
+      "id": "m5_orders_by_channel",
+      "question": "orders by channel",
+      "gold_sql": "SELECT channel, COUNT(DISTINCT sales_order_number) AS orders FROM v_orders GROUP BY 1 ORDER BY 2 DESC",
+      "spider_difficulty": "medium",
+      "bird_difficulty": "simple",
+      "ordered": true,
+      "evidence": null
+    },
+    {
+      "id": "m6_units_this_month",
+      "question": "total sales units this month",
+      "gold_sql": "SELECT SUM(sold_qty) AS total FROM v_sold WHERE sale_date >= date_trunc('month', DATE '2026-08-25')",
+      "spider_difficulty": "medium",
+      "bird_difficulty": "moderate",
+      "ordered": false,
+      "evidence": "This month is August 2026 based on latest sale_date."
+    },
+    {
+      "id": "h1_least_items_2024",
+      "question": "least items sold in 2024",
+      "gold_sql": "SELECT item_number, SUM(sold_qty) AS total FROM v_sold WHERE sale_date >= DATE '2024-01-01' AND sale_date < DATE '2025-01-01' GROUP BY 1 ORDER BY 2 ASC LIMIT 10",
+      "spider_difficulty": "hard",
+      "bird_difficulty": "challenging",
+      "ordered": true,
+      "evidence": "Least means ORDER BY quantity ASC. Full calendar year includes December. Items are on v_sold, not channel."
+    },
+    {
+      "id": "h2_top_item_dec_jan",
+      "question": "top selling product from December 2025 to January 2026",
+      "gold_sql": "SELECT item_number, SUM(sold_qty) AS total FROM v_sold WHERE sale_date >= DATE '2025-12-01' AND sale_date < DATE '2026-02-01' GROUP BY 1 ORDER BY 2 DESC LIMIT 1",
+      "spider_difficulty": "hard",
+      "bird_difficulty": "moderate",
+      "ordered": true,
+      "evidence": "Range is 2025-12-01 inclusive through 2026-01-31."
+    },
+    {
+      "id": "h3_customers_5plus",
+      "question": "customers who ordered more than 5 times",
+      "gold_sql": "SELECT customer_name, COUNT(DISTINCT sales_order_number) AS orders FROM v_orders GROUP BY 1 HAVING COUNT(DISTINCT sales_order_number) > 5 ORDER BY 2 DESC",
+      "spider_difficulty": "hard",
+      "bird_difficulty": "moderate",
+      "ordered": true,
+      "evidence": "Order frequency is COUNT DISTINCT sales_order_number on v_orders."
+    },
+    {
+      "id": "h4_units_last_month",
+      "question": "total sales units last month",
+      "gold_sql": "SELECT SUM(sold_qty) AS total FROM v_sold WHERE sale_date >= date_trunc('month', DATE '2026-08-25') - INTERVAL 1 MONTH AND sale_date < date_trunc('month', DATE '2026-08-25')",
+      "spider_difficulty": "hard",
+      "bird_difficulty": "moderate",
+      "ordered": false,
+      "evidence": "Last month is July 2026 relative to as-of 2026-08-25."
+    },
+    {
+      "id": "h5_avg_order_size",
+      "question": "average order size this month",
+      "gold_sql": "SELECT SUM(sold_qty) * 1.0 / NULLIF(COUNT(DISTINCT sales_order_number), 0) AS avg_order_size FROM v_sold WHERE sale_date >= date_trunc('month', DATE '2026-08-25')",
+      "spider_difficulty": "hard",
+      "bird_difficulty": "challenging",
+      "ordered": false,
+      "evidence": "Order size is units per distinct sales order in v_sold."
+    },
+    {
+      "id": "x1_month_compare",
+      "question": "compare this month vs last month sales",
+      "gold_sql": "SELECT SUM(CASE WHEN sale_date >= date_trunc('month', DATE '2026-08-25') THEN sold_qty ELSE 0 END) AS this_month, SUM(CASE WHEN sale_date >= date_trunc('month', DATE '2026-08-25') - INTERVAL 1 MONTH AND sale_date < date_trunc('month', DATE '2026-08-25') THEN sold_qty ELSE 0 END) AS last_month FROM v_sold",
+      "spider_difficulty": "extra",
+      "bird_difficulty": "challenging",
+      "ordered": false,
+      "numeric_only": true,
+      "evidence": "This month is Aug 2026; last month is Jul 2026. Use v_sold sold_qty."
+    },
+    {
+      "id": "x2_unique_customers_month",
+      "question": "how many unique customers this month",
+      "gold_sql": "SELECT COUNT(DISTINCT customer_name) AS customers FROM v_orders WHERE invoice_date >= date_trunc('month', DATE '2026-08-26')",
+      "spider_difficulty": "medium",
+      "bird_difficulty": "moderate",
+      "ordered": false,
+      "evidence": "Customers this month from v_orders.invoice_date."
+    },
+    {
+      "id": "x3_lowest_last_month",
+      "question": "the 10 lowest quantity items sold last month",
+      "gold_sql": "SELECT item_number, SUM(sold_qty) AS total FROM v_sold WHERE sale_date >= date_trunc('month', DATE '2026-08-25') - INTERVAL 1 MONTH AND sale_date < date_trunc('month', DATE '2026-08-25') GROUP BY 1 ORDER BY 2 ASC LIMIT 10",
+      "spider_difficulty": "extra",
+      "bird_difficulty": "challenging",
+      "ordered": true,
+      "evidence": "v_orders has no items. Use v_sold.item_number and SUM(sold_qty). Last month is July 2026."
+    },
+    {
+      "id": "x4_orders_last_month",
+      "question": "total orders last month",
+      "gold_sql": "SELECT COUNT(DISTINCT sales_order_number) AS orders FROM v_orders WHERE invoice_date >= date_trunc('month', DATE '2026-08-26') - INTERVAL 1 MONTH AND invoice_date < date_trunc('month', DATE '2026-08-26')",
+      "spider_difficulty": "hard",
+      "bird_difficulty": "moderate",
+      "ordered": false,
+      "evidence": "Last month for orders uses invoice_date on v_orders."
+    },
+    {
+      "id": "x5_top10_items_all",
+      "question": "top 10 items by quantity sold",
+      "gold_sql": "SELECT item_number, SUM(sold_qty) AS total FROM v_sold GROUP BY 1 ORDER BY 2 DESC LIMIT 10",
+      "spider_difficulty": "easy",
+      "bird_difficulty": "simple",
+      "ordered": true,
+      "evidence": null
+    }
+  ]
+}
