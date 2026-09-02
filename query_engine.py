@@ -293,6 +293,17 @@ def _llm_query_plan(question: str, db_path: str = DB_PATH, model: str | None = N
         elapsed_ms = response["llm_ms"]
         print(f"LLM plan {chosen_model}: {elapsed_ms} ms")
         raw = response["content"]
+        
+        # Verbose: show the plan
+        import os
+        if os.getenv("LLM_VERBOSE", "").lower() in ("1", "true", "yes"):
+            print("\n" + "="*80)
+            print("PLAN JSON:")
+            print("="*80)
+            print(raw[:1500])
+            if len(raw) > 1500:
+                print(f"... ({len(raw) - 1500} more characters) ...")
+            print("="*80 + "\n")
     except Exception as e:
         print(f"LLM plan failed: {e}")
         return _empty_plan(_raw=str(e), _source="llm_error", _llm_ms=0)
@@ -1598,6 +1609,16 @@ def _answer_with_sql(question: str, db_path: str, debug: dict, model: str) -> di
     attempts = []
     sql = enforce_limit(extracted)
     debug["sql_query"] = sql
+    
+    # Verbose: show the SQL
+    import os
+    if os.getenv("LLM_VERBOSE", "").lower() in ("1", "true", "yes"):
+        print("\n" + "="*80)
+        print("GENERATED SQL:")
+        print("="*80)
+        print(sql)
+        print("="*80 + "\n")
+    
     df = None
     last_error = None
     for attempt in range(MAX_SQL_RETRIES + 1):

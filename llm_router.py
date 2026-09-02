@@ -6,26 +6,27 @@ Provides a single interface for calling different LLM providers.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
 
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
 
-# API clients (lazy-loaded)
 _openai_client = None
 _anthropic_client = None
 
-# Check which APIs are available based on API keys
+
 def has_openai_key() -> bool:
     """Check if OpenAI API key is configured."""
     return bool(os.getenv("OPENAI_API_KEY", "").strip())
 
+
 def has_anthropic_key() -> bool:
     """Check if Anthropic API key is configured."""
     return bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
+
 
 def _get_openai_client():
     """Lazy-load OpenAI client."""
@@ -37,6 +38,7 @@ def _get_openai_client():
         except ImportError:
             raise ImportError("openai package not installed. Run: pip install openai")
     return _openai_client
+
 
 def _get_anthropic_client():
     """Lazy-load Anthropic client."""
@@ -50,49 +52,75 @@ def _get_anthropic_client():
     return _anthropic_client
 
 
-# Model registry with provider info
+# Local Ollama models first (dropdown order), then cloud APIs.
 MODEL_REGISTRY = {
     "llama3.2:3b": {
         "provider": "ollama",
         "label": "Llama 3.2 3B",
-        "note": "Fastest - best for quick queries",
+        "note": "Fastest local — quick queries",
         "family": "llama",
     },
     "qwen2.5:7b": {
         "provider": "ollama",
         "label": "Qwen 2.5 7B",
-        "note": "Stronger SQL - slower but more accurate",
+        "note": "Stronger SQL — local",
         "family": "qwen",
+    },
+    "deepseek-r1:8b": {
+        "provider": "ollama",
+        "label": "DeepSeek R1 8B",
+        "note": "Local reasoning — lighter GPU/RAM",
+        "family": "deepseek",
+    },
+    "deepseek-r1:14b": {
+        "provider": "ollama",
+        "label": "DeepSeek R1 14B",
+        "note": "Best local SQL/reasoning — needs more RAM",
+        "family": "deepseek",
     },
     "gpt-4o-mini": {
         "provider": "openai",
         "label": "GPT-4o Mini",
-        "note": "Fast cloud model - good balance",
+        "note": "Fast cloud — good balance",
         "family": "gpt",
     },
     "claude-sonnet-5": {
         "provider": "anthropic",
         "label": "Claude Sonnet 5",
-        "note": "Most capable - best for complex queries",
+        "note": "Cloud — complex queries",
         "family": "claude",
     },
 }
 
-# Browser/localStorage and older docs still send these IDs. Anthropic 404s them.
+# Prefer stronger local models when the requested one is missing.
+LOCAL_FALLBACK_ORDER = (
+    "deepseek-r1:14b",
+    "deepseek-r1:8b",
+    "qwen2.5:7b",
+    "llama3.2:3b",
+)
+
+# Browser/localStorage and older docs still send these IDs.
 MODEL_ALIASES = {
     "claude-3-5-sonnet-20241022": "claude-sonnet-5",
     "claude-3-5-sonnet-latest": "claude-sonnet-5",
     "claude-3-7-sonnet-20250219": "claude-sonnet-5",
     "claude-sonnet-4-5": "claude-sonnet-5",
     "claude-sonnet-4-6": "claude-sonnet-5",
+    "deepseek-r1": "deepseek-r1:14b",
+    "deepseek-r1:latest": "deepseek-r1:14b",
+    "deepseek-r1:7b": "deepseek-r1:8b",
+    "deepseek": "deepseek-r1:14b",
 }
+
+# Safe default on small machines; resolve_model upgrades to DeepSeek/Qwen when pulled.
 DEFAULT_MODEL = "llama3.2:3b"
 
 
 def canonical_model(model: str | None) -> str | None:
     if not model:
         return model
-    return MODEL_ALIASES.get(model, model)
+    return MODEL_ALIASES.get(model.strip(), model.strip())
 
 
 def get_provider(model: str) -> str:
@@ -101,31 +129,71 @@ def get_provider(model: str) -> str:
     return MODEL_REGISTRY.get(model, {}).get("provider", "ollama")
 
 
+def _ollama_model_names() -> set[str]:
+    """Names Ollama reports (full tags + bare base names)."""
+    import ollama
+
+    listing = ollama.list()
+    models = listing.get("models") if isinstance(listing, dict) else getattr(listing, "models", None)
+    names: set[str] = set()
+    for item in models or []:
+        name = item.get("model") if isinstance(item, dict) else getattr(item, "model", None)
+        if not name:
+            name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+        if not name:
+            continue
+        names.add(name)
+        names.add(name.split(":")[0])
+    return names
+
+
 def is_model_available(model: str) -> bool:
-    """Check if a model is available (API key present or Ollama installed)."""
+    """Check if a model is available (API key present or Ollama tag installed)."""
     model = canonical_model(model) or model
     provider = get_provider(model)
-    
+
     if provider == "ollama":
         try:
-            import ollama
-            listing = ollama.list()
-            models = listing.get("models") if isinstance(listing, dict) else getattr(listing, "models", None)
-            names = set()
-            for item in models or []:
-                name = item.get("model") if isinstance(item, dict) else getattr(item, "model", None)
-                if name:
-                    names.add(name)
-                    names.add(name.split(":")[0])
-            return model in names
+            # Full tags are stored (e.g. deepseek-r1:14b); bare names too.
+            return model in _ollama_model_names()
         except Exception:
             return False
-    elif provider == "openai":
+    if provider == "openai":
         return has_openai_key()
-    elif provider == "anthropic":
+    if provider == "anthropic":
         return has_anthropic_key()
-    
     return False
+
+
+def _strip_thinking(text: str, verbose: bool = False) -> str:
+    """Remove DeepSeek-R1 / similar reasoning blocks; keep the final answer."""
+    if not text:
+        return text
+    
+    # Print raw response if verbose
+    if verbose and "<think>" in text.lower():
+        print("\n" + "="*80)
+        print("RAW LLM RESPONSE (with thinking):")
+        print("="*80)
+        print(text[:2000])  # First 2000 chars
+        if len(text) > 2000:
+            print(f"\n... ({len(text) - 2000} more characters) ...")
+        print("="*80 + "\n")
+    
+    tag = "think"
+    cleaned = re.sub(
+        rf"<{tag}>.*?</{tag}>",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(
+        rf"<{tag}>.*",
+        "",
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+    return cleaned or text.strip()
 
 
 def call_llm(
@@ -137,25 +205,20 @@ def call_llm(
 ) -> dict[str, Any]:
     """
     Unified interface for calling different LLM providers.
-    
-    Args:
-        model: Model identifier (e.g., "llama3.2:3b", "gpt-4o-mini", "claude-3-5-sonnet-20241022")
-        messages: List of message dicts with "role" and "content" keys
-        temperature: Sampling temperature (0.0 = deterministic)
-        max_tokens: Maximum tokens to generate (None = provider default)
-        format_json: Whether to request JSON format output
-    
+
     Returns:
-        Dict with:
-            - content: The generated text response
-            - llm_ms: Elapsed time in milliseconds
-            - provider: Which provider was used
-            - model: Model identifier used
+        Dict with content, llm_ms, provider, model.
     """
     model = canonical_model(model) or model
     provider = get_provider(model)
     started = datetime.utcnow()
-    
+
+    # Reasoning models spend many tokens on hidden chain-of-thought before SQL/JSON.
+    if max_tokens is not None and "deepseek" in model.lower():
+        max_tokens = max(int(max_tokens), 2048)
+    elif max_tokens is None and "deepseek" in model.lower():
+        max_tokens = 4096
+
     try:
         if provider == "ollama":
             response_content = _call_ollama(model, messages, temperature, max_tokens, format_json)
@@ -165,16 +228,14 @@ def call_llm(
             response_content = _call_anthropic(model, messages, temperature, max_tokens, format_json)
         else:
             raise ValueError(f"Unknown provider: {provider}")
-        
+
         elapsed_ms = round((datetime.utcnow() - started).total_seconds() * 1000, 1)
-        
         return {
             "content": response_content,
             "llm_ms": elapsed_ms,
             "provider": provider,
             "model": model,
         }
-    
     except Exception as e:
         elapsed_ms = round((datetime.utcnow() - started).total_seconds() * 1000, 1)
         raise Exception(f"LLM call failed ({provider}/{model}): {str(e)}") from e
@@ -187,30 +248,42 @@ def _call_ollama(
     max_tokens: int | None,
     format_json: bool,
 ) -> str:
-    """Call Ollama API."""
+    """Call Ollama API (Llama / Qwen / DeepSeek, etc.)."""
     import ollama
-    
-    options = {"temperature": temperature}
+
+    options: dict[str, Any] = {"temperature": temperature}
     if max_tokens:
         options["num_predict"] = max_tokens
-    
-    kwargs = {
+
+    kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "options": options,
     }
-    
-    # Add JSON format if requested
+
     if format_json:
         try:
             response = ollama.chat(**kwargs, format="json")
         except TypeError:
-            # Older ollama version doesn't support format parameter
             response = ollama.chat(**kwargs)
     else:
         response = ollama.chat(**kwargs)
+
+    content = response["message"]["content"]
+    if isinstance(content, list):
+        # Some clients return content parts; join text pieces.
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text") or "")
+            elif isinstance(part, str):
+                parts.append(part)
+        content = "".join(parts)
     
-    return response["message"]["content"].strip()
+    # Strip reasoning blocks from DeepSeek / similar.
+    # Set LLM_VERBOSE=1 env var to see thinking in terminal
+    verbose_logging = os.getenv("LLM_VERBOSE", "").lower() in ("1", "true", "yes")
+    return _strip_thinking(str(content).strip(), verbose=verbose_logging)
 
 
 def _call_openai(
@@ -222,20 +295,15 @@ def _call_openai(
 ) -> str:
     """Call OpenAI API."""
     client = _get_openai_client()
-    
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
     }
-    
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
-    
-    # Request JSON format if needed
     if format_json:
         kwargs["response_format"] = {"type": "json_object"}
-    
     response = client.chat.completions.create(**kwargs)
     return response.choices[0].message.content.strip()
 
@@ -249,42 +317,32 @@ def _call_anthropic(
 ) -> str:
     """Call Anthropic API."""
     client = _get_anthropic_client()
-    
-    # Anthropic requires system message to be separate
+
     system_content = None
     api_messages = []
-    
     for msg in messages:
         if msg["role"] == "system":
-            # Combine multiple system messages
             if system_content is None:
                 system_content = msg["content"]
             else:
                 system_content += "\n\n" + msg["content"]
         else:
             api_messages.append(msg)
-    
-    # If JSON format requested, add instruction to system prompt
+
     if format_json and system_content:
         system_content += "\n\nRespond with valid JSON only."
-    
-    kwargs = {
+
+    kwargs: dict[str, Any] = {
         "model": model,
         "messages": api_messages,
-        "max_tokens": max_tokens or 4096,  # Anthropic requires max_tokens
+        "max_tokens": max_tokens or 4096,
     }
-    # Newer models (extended thinking on by default) reject a custom temperature —
-    # the API pins it to 1 while thinking is active. Only pass it when the
-    # caller actually wants non-default sampling; this app always asks for 0.0.
     if temperature not in (None, 0.0):
         kwargs["temperature"] = temperature
-
     if system_content:
         kwargs["system"] = system_content
 
     response = client.messages.create(**kwargs)
-    # With extended thinking on, content[0] is a ThinkingBlock, not the reply —
-    # find the actual text block instead of assuming a fixed index.
     for block in response.content:
         if getattr(block, "type", None) == "text":
             return block.text.strip()
@@ -292,24 +350,15 @@ def _call_anthropic(
 
 
 def list_available_models() -> list[dict]:
-    """
-    Get list of all models with their availability status.
-    
-    Returns:
-        List of dicts with model info and availability status.
-    """
+    """All registered models with readiness for the UI dropdown."""
     models = []
-    
     for model_id, info in MODEL_REGISTRY.items():
         provider = info["provider"]
         ready = is_model_available(model_id)
-        
-        # Determine availability status
         if provider == "ollama":
             status = "ready" if ready else "download_required"
         else:
             status = "ready" if ready else "api_key_required"
-        
         models.append({
             "id": model_id,
             "label": info["label"],
@@ -320,34 +369,25 @@ def list_available_models() -> list[dict]:
             "status": status,
             "default": model_id == DEFAULT_MODEL,
         })
-    
     return models
 
 
 def resolve_model(requested: str | None) -> str:
     """
-    Resolve a model request to an available model.
-    
-    Args:
-        requested: Requested model ID or None
-    
-    Returns:
-        Model ID to use (falls back to default if requested is unavailable)
+    Resolve a model id to one that is actually available.
+
+    Preference when falling back: DeepSeek 14B → 8B → Qwen → Llama → any other ready model.
     """
     requested = canonical_model(requested)
-    if requested and requested in MODEL_REGISTRY:
-        # Check if requested model is available
-        if is_model_available(requested):
-            return requested
-    
-    # Fall back to default if available
-    if is_model_available(DEFAULT_MODEL):
-        return DEFAULT_MODEL
-    
-    # Try to find any available model
+    if requested and requested in MODEL_REGISTRY and is_model_available(requested):
+        return requested
+
+    for model_id in LOCAL_FALLBACK_ORDER:
+        if model_id in MODEL_REGISTRY and is_model_available(model_id):
+            return model_id
+
     for model_id in MODEL_REGISTRY:
         if is_model_available(model_id):
             return model_id
-    
-    # No models available, return default anyway (will fail later with clear error)
+
     return DEFAULT_MODEL
