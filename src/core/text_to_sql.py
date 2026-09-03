@@ -10,7 +10,7 @@ from pathlib import Path
 
 import duckdb
 
-from llm_router import call_llm
+from src.core.llm_router import call_llm
 
 ALLOWED_TABLES = frozenset({"v_orders", "v_sold"})
 FORBIDDEN_FUNCS = frozenset({
@@ -29,9 +29,9 @@ FORBIDDEN_FUNCS = frozenset({
 })
 MAX_ROWS = 100
 MAX_SQL_RETRIES = 2
-MEMORY_PATH = Path(__file__).resolve().parent / "sql_memory.jsonl"
-REJECTION_PATH = Path(__file__).resolve().parent / "sql_rejections.jsonl"
-ORPHAN_MONITOR_PATH = Path(__file__).resolve().parent / "orphaned_sold_monitor.jsonl"
+MEMORY_PATH = Path(__file__).resolve().parent.parent.parent / "sql_memory.jsonl"
+REJECTION_PATH = Path(__file__).resolve().parent.parent.parent / "sql_rejections.jsonl"
+ORPHAN_MONITOR_PATH = Path(__file__).resolve().parent.parent.parent / "orphaned_sold_monitor.jsonl"
 FORECAST_RE = re.compile(r"\b(forecast|predict|prediction|projection)\b", re.I)
 LIKELY_RE = re.compile(
     r"\b(most likely|likely to (be )?sold|expected (to )?sell|will sell|going to sell)\b",
@@ -116,61 +116,61 @@ def apply_requested_limit(sql: str, question: str) -> str:
 
 VIEW_DDL = [
     """
-    -- v_orders: Clean sales order headers
-    -- Filters: Non-canceled, processable orders only
-    -- Source: sales_order (SalesTable from D365)
+    -- v_orders: Sales order headers the chat is allowed to see.
+    -- Filters: Order type = Sales order, Release = Open, Do not process = No,
+    --          not Canceled. Channel may be GC001 or NULL — both are valid.
     CREATE OR REPLACE VIEW v_orders AS
     SELECT
         sales_order_number,
         customer_account,
         customer_name,
         order_type,
+        invoice_account,
         channel,
         status,
+        release_status,
+        do_not_process,
+        sales_taker,
         site,
         warehouse,
         CAST(invoice_date AS DATE) AS invoice_date
     FROM sales_order
-    WHERE status NOT IN ('Canceled', 'Cancelled')
-      AND do_not_process != 'Yes'
+    WHERE order_type = 'Sales order'
+      AND release_status = 'Open'
+      AND do_not_process = 'No'
+      AND status NOT IN ('Canceled', 'Cancelled')
     """,
     """
-    -- v_sold: Completed unit sales with customer context
-    -- Source: inventory_transaction (InventTrans from D365)
-    --         INNER JOIN sales_order (SalesTable from D365)
-    --
-    -- D365 Relationship: InventTrans.TransRefId -> SalesTable.SalesId
-    -- Current join: inventory_transaction.number = sales_order.sales_order_number
-    --
-    -- Orphaned sold rows (no matching sales_order header) are excluded so they
-    -- cannot bypass Cancelled / Do-Not-Process checks. Monitor via
-    -- count_orphaned_sold_rows() / orphaned_sold_monitor.jsonl.
-    --
-    -- Filters:
-    --   - reference = 'Sales order'
-    --   - issue = 'Sold'
-    --   - quantity < 0 (outbound/issue in D365 convention)
-    --   - Non-canceled, processable order headers only
+    -- v_sold: Inventory lines that are actual sales, joined to the order header.
+    -- Join: inventory.number = sales_order.sales_order_number
+    --       only when inventory.reference = 'Sales order'
+    -- Issue/Sold is applied here so the LLM never sees On-order / reserved rows.
+    -- Item number and product number are the same SKU (tiny mismatches exist).
     CREATE OR REPLACE VIEW v_sold AS
     SELECT
         it.item_number,
         it.product_number,
         CAST(it.physical_date AS DATE) AS sale_date,
-        CAST(it.financial_date AS DATE) AS financial_date,
         it.number AS sales_order_number,
         it.site,
         it.warehouse,
+        it.unit,
+        it.cost_amount,
         so.customer_account,
         so.customer_name,
+        so.invoice_account,
         so.channel,
+        so.sales_taker,
         (-it.quantity) AS sold_qty
     FROM inventory_transaction it
     JOIN sales_order so ON it.number = so.sales_order_number
     WHERE it.reference = 'Sales order'
       AND it.issue = 'Sold'
       AND it.quantity < 0
+      AND so.order_type = 'Sales order'
+      AND so.release_status = 'Open'
+      AND so.do_not_process = 'No'
       AND so.status NOT IN ('Canceled', 'Cancelled')
-      AND so.do_not_process != 'Yes'
     """,
 ]
 
@@ -185,10 +185,17 @@ def _views_look_current(db_path: str) -> bool:
         try:
             sold_cols = {r[0] for r in con.execute("DESCRIBE v_sold").fetchall()}
             order_cols = {r[0] for r in con.execute("DESCRIBE v_orders").fetchall()}
-            if "sold_qty" not in sold_cols or "invoice_date" not in order_cols:
+            needed_sold = {"sold_qty", "item_number", "product_number", "unit", "cost_amount"}
+            needed_ord = {
+                "invoice_date",
+                "invoice_account",
+                "sales_taker",
+                "order_type",
+                "release_status",
+            }
+            if not needed_sold.issubset(sold_cols) or not needed_ord.issubset(order_cols):
                 return False
-            # Old LEFT-JOIN definition exposed this flag; new view must not.
-            if "missing_order_header" in sold_cols:
+            if "missing_order_header" in sold_cols or "financial_date" in sold_cols:
                 return False
             return True
         finally:
@@ -290,16 +297,24 @@ def build_schema_card(db_path: str) -> str:
             if view == "v_orders":
                 dmin = _scalar(con, "SELECT MIN(invoice_date) FROM v_orders")
                 dmax = _scalar(con, "SELECT MAX(invoice_date) FROM v_orders")
-                ch = [r[0] for r in con.execute(
-                    "SELECT channel, COUNT(*) c FROM v_orders GROUP BY 1 ORDER BY c DESC LIMIT 8"
-                ).fetchall()]
+                ch = [
+                    ("(blank)" if r[0] is None else r[0])
+                    for r in con.execute(
+                        "SELECT channel, COUNT(*) c FROM v_orders GROUP BY 1 ORDER BY c DESC LIMIT 8"
+                    ).fetchall()
+                ]
                 lines.append(f"  invoice_date range: {dmin} .. {dmax}")
-                lines.append(f"  channel examples: {ch}")
+                lines.append(f"  channel values (GC001 and blank/NULL are both valid): {ch}")
+                lines.append("  order_type is already 'Sales order' only. Returned orders are excluded.")
+                lines.append("  Count orders with COUNT(DISTINCT sales_order_number). No items on this view.")
             else:
                 dmin = _scalar(con, "SELECT MIN(sale_date) FROM v_sold")
                 dmax = _scalar(con, "SELECT MAX(sale_date) FROM v_sold")
                 lines.append(f"  sale_date range: {dmin} .. {dmax}")
+                lines.append("  sale_date = Physical date. item_number and product_number are the same SKU.")
                 lines.append("  sold_qty is already positive units sold. Never SUM(quantity). Never join raw tables.")
+                lines.append("  Join already done: Number (inventory) = Sales order (header), Reference = Sales order only.")
+                lines.append("  unit = UOM. cost_amount = inventory cost, not customer price or revenue.")
                 # Orphans are excluded from v_sold; count comes from raw tables.
                 try:
                     orphan_n = count_orphaned_sold_rows(db_path)
@@ -532,86 +547,119 @@ def generate_sql(question: str, model: str, db_path: str) -> dict:
             as_of_date = line.split(':')[-1].strip()
             break
     
-    system = f"""You are a DuckDB SQL writer for a sales database.
+    system = f"""You write DuckDB SQL quickly. Use templates below - no deep reasoning needed.
 
-RESPONSE FORMAT:
-First line: CHART:<type> where <type> is one of: pie, bar, line, stat
-- pie: for distributions, breakdowns, percentages, proportions (2-10 categories)
-- bar: for rankings, comparisons, top N lists (2-20 items)
-- line: for time series, trends, daily/monthly patterns
-- stat: for single aggregate values (total, count, average)
+FORMAT (pick one line, then SQL):
+CHART:stat   → Single number (total, count, average)
+CHART:bar    → Top N rankings (items, customers, warehouses)
+CHART:line   → Time trends (daily, monthly)
+CHART:pie    → Distributions (channels, customers)
+FORECAST     → Future predictions (use JSON format)
+UNSUPPORTED  → Profit, margin, revenue, stock on hand
 
-Second line onwards: ONE SQL statement. No markdown, no comments.
-Read the user's question and write SQL that answers that question. Do not reuse a canned query.
+AVAILABLE DATA (ONLY these columns exist):
+
+TABLE v_sold (units sold - use for quantity/items/sales volume):
+  ✓ item_number          Product SKU (same as product_number)
+  ✓ product_number       Product SKU (same as item_number)
+  ✓ sale_date            Physical date when sale happened
+  ✓ sold_qty             Units sold (already POSITIVE, already filtered)
+  ✓ unit                 Unit of measure (pcs, kg, etc)
+  ✓ cost_amount          Inventory cost (NOT selling price, NOT revenue)
+  ✓ site                 Site location
+  ✓ warehouse            Warehouse location
+  ✓ sales_order_number   Order ID (links to v_orders)
+  ✓ customer_account     Customer ID
+  ✓ customer_name        Customer name
+  ✓ invoice_account      Invoice customer
+  ✓ channel              GC001 or NULL (both valid)
+  ✓ sales_taker          Who took the order
+  FILTERS ALREADY APPLIED: Reference='Sales order', Issue='Sold', Order type='Sales order',
+                           Release='Open', Do not process='No', not Canceled
+
+TABLE v_orders (order headers - use for order counts):
+  ✓ sales_order_number   Order ID (unique)
+  ✓ customer_account     Customer ID
+  ✓ customer_name        Customer name
+  ✓ order_type           ALREADY 'Sales order' only
+  ✓ invoice_account      Invoice customer
+  ✓ channel              GC001 or NULL (both valid)
+  ✓ status               Invoiced / Open order / Delivered (Canceled excluded)
+  ✓ release_status       ALREADY 'Open' only
+  ✓ do_not_process       ALREADY 'No' only
+  ✓ sales_taker          Who took the order
+  ✓ site                 Site location
+  ✓ warehouse            Warehouse location
+  ✓ invoice_date         Invoice date
+  NO ITEMS IN THIS TABLE - For items/products, use v_sold
+
+DO NOT use these columns (they don't exist or are already filtered):
+  ✗ financial_date, receipt, issue, reference, location, size, color, style
+  ✗ quantity (use sold_qty), number (use sales_order_number)
 
 {card}
 
-Business rules already applied inside the views — do not re-filter Canceled/Sold:
-- v_orders = non-canceled, processable sales orders. Date column: invoice_date.
-  Count orders with COUNT(DISTINCT sales_order_number). This view has NO items.
-- v_sold = completed unit sales. Date column: sale_date (physical date).
-  Quantity column: sold_qty (already positive). SUM(sold_qty) for units sold.
-  Use this view for items, daily sold trend, customers by units.
+QUICK TEMPLATES (copy and adapt - no reasoning needed):
 
-Never query sales_order or inventory_transaction.
-Never use sold_qty from v_orders. Never group v_orders by item_number.
+Q: "total sales this month"
+CHART:stat
+SELECT SUM(sold_qty) FROM v_sold WHERE sale_date >= date_trunc('month', DATE '{as_of_date}')
 
-If the user asks to forecast or predict future sales, which item will sell, what is most likely to sell, or demand in a future / next period, reply with exactly this shape (no SQL). Do not query v_sold for future dates — that is history, not a forecast.
+Q: "top 5 items"
+CHART:bar
+SELECT item_number, SUM(sold_qty) AS qty FROM v_sold GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+
+Q: "top 10 customers by quantity"
+CHART:bar
+SELECT customer_name, SUM(sold_qty) AS qty FROM v_sold GROUP BY 1 ORDER BY 2 DESC LIMIT 10
+
+Q: "top 10 customers by orders"
+CHART:bar
+SELECT customer_name, COUNT(DISTINCT sales_order_number) AS orders FROM v_orders GROUP BY 1 ORDER BY 2 DESC LIMIT 10
+
+Q: "pie chart customers" / "customer breakdown"
+CHART:pie
+SELECT customer_name, SUM(sold_qty) FROM v_sold GROUP BY 1 ORDER BY 2 DESC LIMIT 10
+
+Q: "daily trend this month"
+CHART:line
+SELECT sale_date, SUM(sold_qty) FROM v_sold WHERE sale_date >= date_trunc('month', DATE '{as_of_date}') GROUP BY 1 ORDER BY 1
+
+Q: "sales by warehouse"
+CHART:bar
+SELECT warehouse, SUM(sold_qty) FROM v_sold GROUP BY 1 ORDER BY 2 DESC
+
+Q: "orders by channel"
+CHART:bar
+SELECT channel, COUNT(DISTINCT sales_order_number) FROM v_orders GROUP BY 1 ORDER BY 2 DESC
+
+Q: "forecast next 30 days" / "predict sales"
 FORECAST
-{{"start":"YYYY-MM-DD","end":"YYYY-MM-DD","grain":"day|week|month","item":null}}
-Rules for the window:
-- Treat the as-of date in the schema card as "today" (latest sale in the data), not the real calendar today
-- Use the dates the user named. "October to November 2026" → start 2026-10-01, end 2026-11-30
-- A single month → first day through last day of that month
-- "next N days/weeks/months" starts the day after as-of
-- grain: day if the span is 90 days or less, month if longer, unless the user asked for daily or weekly
-- item: the item_number the user named, or null for all sold units. Never invent an item code.
-If the question needs profit, margin, cost, or stock on hand, reply with exactly UNSUPPORTED
+{{"start":"2026-09-04","end":"2026-10-03","grain":"day","item":null}}
 
-Common question patterns (use these as templates):
-- "total sales this month" → SELECT SUM(sold_qty) AS total FROM v_sold WHERE sale_date >= date_trunc('month', DATE '{as_of_date}')
-- "total sales this year" / "sales done this year" → SELECT SUM(sold_qty) AS total FROM v_sold WHERE sale_date >= date_trunc('year', DATE '{as_of_date}') AND sale_date < date_trunc('year', DATE '{as_of_date}') + INTERVAL '1 year'
-  That SUM covers EVERY sold row in the year. Never SELECT * and never LIMIT before aggregating.
-- "top N items" → SELECT item_number, SUM(sold_qty) AS total FROM v_sold WHERE <time filter> GROUP BY 1 ORDER BY 2 DESC LIMIT N
-- "list all products/items" → ALWAYS interpret as "top 15 items" and use LIMIT 15
-- "all customers" → ALWAYS interpret as "top 15 customers" and use LIMIT 15
-- "top N customers by orders" → SELECT customer_name, COUNT(DISTINCT sales_order_number) AS orders FROM v_orders WHERE <time filter> GROUP BY 1 ORDER BY 2 DESC LIMIT N
-- "top N customers by quantity" → SELECT customer_name, SUM(sold_qty) AS total FROM v_sold WHERE <time filter> GROUP BY 1 ORDER BY 2 DESC LIMIT N
-- "daily trend" → SELECT sale_date, SUM(sold_qty) AS daily_total FROM v_sold WHERE <time filter> GROUP BY 1 ORDER BY 1
-- "orders by channel" → SELECT channel, COUNT(DISTINCT sales_order_number) AS orders FROM v_orders WHERE <time filter> GROUP BY 1 ORDER BY 2 DESC
-- "compare months" → Use CASE WHEN with date_trunc('month', ...) to split periods, then SUM per group
-- "top 5 customers in 2026" (bare year, no month named) → SELECT customer_name, SUM(sold_qty) AS total FROM v_sold WHERE sale_date >= DATE '2026-01-01' AND sale_date < DATE '2027-01-01' GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+Q: "profit margin" / "revenue" / "stock on hand"
+UNSUPPORTED
 
-CHART-FRIENDLY LIMITS:
-- When asked for "all" or "list" without a specific number, ALWAYS add LIMIT 15
-- Never return more than 20 rows for item/customer lists (charts become unreadable)
-- If user wants more, they can view the full table, but chart should show top 15
+RULES (must follow):
+1. Latest data date is {as_of_date} - use this as "today"
+2. "this month" = WHERE sale_date >= date_trunc('month', DATE '{as_of_date}')
+3. "last N days" = WHERE sale_date >= DATE '{as_of_date}' - INTERVAL 'N days'
+4. "all items/customers" = ALWAYS add LIMIT 15 (charts become unreadable without limit)
+5. For quantity/volume: use v_sold with SUM(sold_qty)
+6. For order count: use v_orders with COUNT(DISTINCT sales_order_number)
+7. NEVER use v_orders for item_number (it doesn't have items)
+8. channel can be 'GC001' or NULL - both are valid, don't filter
+9. item_number and product_number are the SAME SKU (use either)
+10. cost_amount is inventory cost, NOT selling price or revenue
 
-CRITICAL ACCURACY RULES:
-1. ALWAYS use the as-of date shown above as "today" - NEVER use current date
-2. For "this month" use: WHERE sale_date >= date_trunc('month', DATE 'YYYY-MM-DD')
-3. For "last month" use: WHERE sale_date >= date_trunc('month', DATE 'YYYY-MM-DD') - INTERVAL '1 month' AND sale_date < date_trunc('month', DATE 'YYYY-MM-DD')
-4. For "last N days" use: WHERE sale_date >= DATE 'YYYY-MM-DD' - INTERVAL 'N days'
-5. Use sold_qty ONLY from v_sold (never from v_orders)
-6. Count orders with COUNT(DISTINCT sales_order_number)
-7. NEVER make up columns that don't exist in the schema
-8. ALWAYS ORDER BY the metric you're measuring (not by name)
-9. If asking for "units" or "quantity", use SUM(sold_qty) from v_sold
-10. If asking for "orders", use COUNT(DISTINCT sales_order_number) from v_orders
-11. ALWAYS add LIMIT 15 for "all products", "all items", "all customers", "list products" queries
-12. Maximum LIMIT for charts should be 20 - larger numbers are unreadable
-13. A bare year with no month named ("in 2026", "for 2025", "this year") means the FULL calendar year:
-    WHERE sale_date >= DATE 'YYYY-01-01' AND sale_date < DATE 'YYYY+1-01-01'
-    Do NOT default to "this month" unless the question actually says "this month" or names no period at all.
-14. Totals ("total sales", "how many units", "sales done this year"): one SUM/COUNT over the full filter.
-    Never list rows. Never LIMIT the underlying sales before SUM. LIMIT is only for top-N / list questions.
-15. The memory examples below show SQL SYNTAX PATTERNS ONLY. Never copy their LIMIT number or
-    their date literals into your answer — always recompute both from THIS question's own wording,
-    even when a memory example looks similar.
+{memory}
 
-{memory}"""
+Now write SQL for this question (one template, adapted):"""
 
     try:
+        # DeepSeek optimization: shorter responses = faster
+        token_limit = 300 if "deepseek" in model.lower() else 400
+        
         response = call_llm(
             model=model,
             messages=[
@@ -619,7 +667,7 @@ CRITICAL ACCURACY RULES:
                 {"role": "user", "content": question},
             ],
             temperature=0.0,
-            max_tokens=400,
+            max_tokens=token_limit,
         )
         raw = response["content"]
         elapsed_ms = response["llm_ms"]
@@ -660,7 +708,9 @@ def rewrite_sql_after_error(question: str, bad_sql: str, error: str, model: str)
         "No markdown, no comments.\n"
         "Use only v_orders and v_sold. Never query sales_order or inventory_transaction.\n"
         "v_orders counts orders (invoice_date, COUNT DISTINCT sales_order_number). "
-        "v_sold is units sold (sale_date, sold_qty already positive)."
+        "v_sold is units sold (sale_date, sold_qty already positive). "
+        "Channel may be GC001 or NULL. item_number = product_number. "
+        "Columns: sales_taker, invoice_account, unit, cost_amount exist."
     )
     user = (
         f"Question: {question}\n\n"

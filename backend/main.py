@@ -11,8 +11,9 @@ from pydantic import BaseModel
 import sys
 from pathlib import Path
 
+# Add parent directory to path for src imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from query_engine import answer_question, list_chat_models, resolve_model
+from src.core.query_engine import answer_question, list_chat_models, resolve_model
 
 app = FastAPI(title="Sales Intelligence API", version="2.0.0")
 

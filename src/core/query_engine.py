@@ -17,14 +17,14 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from llm_router import call_llm, list_available_models, resolve_model as resolve_model_router
+from src.core.llm_router import call_llm, list_available_models, resolve_model as resolve_model_router
 
 # ---------------------------------------------------------------------------
 # Config — change these in one place once real data is confirmed
 # ---------------------------------------------------------------------------
 
-DB_PATH = str(Path(__file__).resolve().parent / "sales_inventory.duckdb")
-PARALLEL_COMPARISON_PATH = Path(__file__).resolve().parent / "parallel_comparison_log.jsonl"
+DB_PATH = str(Path(__file__).resolve().parent.parent.parent / "sales_inventory.duckdb")
+PARALLEL_COMPARISON_PATH = Path(__file__).resolve().parent.parent.parent / "parallel_comparison_log.jsonl"
 
 # Default model (will be resolved by llm_router)
 MODEL = "llama3.2:3b"
@@ -63,35 +63,35 @@ MAX_GROUP_LIMIT = 100
 # ---------------------------------------------------------------------------
 
 SCHEMA_DESCRIPTION = f"""
-Table: sales_order (all placed orders)
-- sales_order_number: unique order id
+Chat uses two views only (never raw Excel tables).
+
+VIEW v_orders — sales order headers (one row per order)
+- sales_order_number: unique order id (same value as inventory Number)
 - customer_account, customer_name: who ordered
-- order_type: type of order
-- channel: Retail Store / Online / Wholesale
-- status: order status (Cancelled orders should never be counted)
-- do_not_process: Yes/No flag (Yes orders should never be counted)
-- site, warehouse: location
+- order_type: already filtered to 'Sales order' (Returned order is excluded)
+- invoice_account: invoice customer (usually same as customer_account)
+- channel: only GC001 or NULL — both are valid; NULL is not missing data
+- status: Invoiced / Open order / Delivered (Canceled already excluded)
+- release_status: already filtered to Open
+- do_not_process: already filtered to No
+- sales_taker: who took the order
+- site, warehouse: order location
 - invoice_date: when it was invoiced
-- NOTE: This table has NO item-level detail (no item_number)
+- This view has NO items and NO quantities
 
-Table: inventory_transaction (actual inventory movements)
-- item_number: which product was moved
-- reference: what kind of document (only "{REFERENCE_SALES_ORDER_VALUE}" rows are sales)
-- quantity: inventory change (negative = issued out/sold, positive = received)
-- number: matches sales_order.sales_order_number
-- physical_date, financial_date: dates on the transaction
-- issue: movement status (only "{ISSUE_SOLD_VALUE}" means completed sale; "On order" is reserved, not sold)
+VIEW v_sold — completed unit sales (inventory lines that are sales)
+- item_number / product_number: same SKU (use either; prefer item_number)
+- sale_date: Physical date (when the sale happened)
+- sales_order_number: inventory Number = v_orders.sales_order_number
+- sold_qty: units sold, already positive. SUM(sold_qty) for quantity
+- unit: unit of measure
+- cost_amount: inventory cost (not selling price / not revenue)
+- site, warehouse: inventory location
+- customer_account, customer_name, invoice_account, channel, sales_taker: from the order header
 
-IMPORTANT DISTINCTION:
-- "order_count" metric: counts orders from sales_order table (all placed orders, no item detail)
-- "issue_quantity" metric: counts actual sold items from inventory_transaction (has item detail)
-- You CANNOT group "order_count" by "item_number" because sales_order has no items
-- You CAN group "issue_quantity" by "item_number" because inventory_transaction has items
-
-Join: inventory_transaction.number = sales_order.sales_order_number,
-      only where inventory_transaction.reference = '{REFERENCE_SALES_ORDER_VALUE}'
-      AND inventory_transaction.issue = '{ISSUE_SOLD_VALUE}'
-      AND inventory_transaction.quantity < 0
+Join already applied: inventory.Number = sales_order."Sales order"
+AND inventory.Reference = 'Sales order' only.
+Transfers, purchases, BOM, and other Reference types are not in these views.
 """
 
 # ---------------------------------------------------------------------------
@@ -886,8 +886,8 @@ def _rank_limit_from_question(question: str) -> int:
 
 
 def _handle_item_rank_forecast(question: str, window: dict, plan: dict, debug: dict) -> dict:
-    from forecast_service import forecast_item_ranking
-    from text_to_sql import is_item_rank_forecast
+    from src.core.forecast_service import forecast_item_ranking
+    from src.core.text_to_sql import is_item_rank_forecast
 
     if not is_item_rank_forecast(question):
         return None
@@ -951,7 +951,7 @@ def _handle_item_rank_forecast(question: str, window: dict, plan: dict, debug: d
 def _handle_forecast(question: str, plan: dict, debug: dict, skip_llm_explain: bool = False) -> dict:
     """Handle forecast requests using forecast_service."""
     try:
-        from forecast_service import (
+        from src.core.forecast_service import (
             build_demand_planning_view,
             generate_forecast,
             resolve_forecast_item,
@@ -1520,7 +1520,7 @@ A: No sales data available for that period."""
 
 
 def _answer_with_sql(question: str, db_path: str, debug: dict, model: str) -> dict:
-    from text_to_sql import (
+    from src.core.text_to_sql import (
         FORECAST_RE,
         MAX_SQL_RETRIES,
         UNSUPPORTED_RE,

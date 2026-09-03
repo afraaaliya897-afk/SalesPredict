@@ -214,10 +214,11 @@ def call_llm(
     started = datetime.utcnow()
 
     # Reasoning models spend many tokens on hidden chain-of-thought before SQL/JSON.
+    # For DeepSeek: limit tokens to force conciseness and faster responses
     if max_tokens is not None and "deepseek" in model.lower():
-        max_tokens = max(int(max_tokens), 2048)
+        max_tokens = min(int(max_tokens), 1200)  # Reduced from 2048 for speed
     elif max_tokens is None and "deepseek" in model.lower():
-        max_tokens = 4096
+        max_tokens = 1200  # Force shorter, faster responses
 
     try:
         if provider == "ollama":

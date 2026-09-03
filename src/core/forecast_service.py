@@ -10,7 +10,7 @@ import re
 from datetime import timedelta
 from pathlib import Path
 
-DB_PATH = str(Path(__file__).resolve().parent / "sales_inventory.duckdb")
+DB_PATH = str(Path(__file__).resolve().parent.parent.parent / "sales_inventory.duckdb")
 
 def get_historical_sales(
     days_back: int | None = None,
@@ -22,7 +22,7 @@ def get_historical_sales(
     days_back=None uses every year on file. A positive days_back still trims from the latest date.
     item_number limits the series to one SKU when the user named an item.
     """
-    from text_to_sql import ensure_views
+    from src.core.text_to_sql import ensure_views
 
     ensure_views(db_path)
     con = duckdb.connect(db_path, read_only=True)
