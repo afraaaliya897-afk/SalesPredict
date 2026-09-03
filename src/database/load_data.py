@@ -1,10 +1,13 @@
 """Load D365 Excel extracts into DuckDB with production cleaning."""
+import sys
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent.parent  # Go up to project root
+sys.path.insert(0, str(ROOT))  # Add project root to Python path
+
 DATA = ROOT / "data"
 DB_PATH = ROOT / "sales_inventory.duckdb"
 
@@ -161,7 +164,7 @@ def build_database() -> None:
     print("CREATING BUSINESS VIEWS")
     print("="*80)
     
-    from text_to_sql import VIEW_DDL
+    from src.core.text_to_sql import VIEW_DDL
 
     for ddl in VIEW_DDL:
         con.execute(ddl)
