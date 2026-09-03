@@ -330,24 +330,77 @@ def build_schema_card(db_path: str) -> str:
 
 
 def _memory_shots(limit: int = 8) -> str:
-    if not MEMORY_PATH.exists():
-        return ""
-    rows = []
-    for line in MEMORY_PATH.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    rows = rows[-limit:]
-    if not rows:
-        return ""
-    bits = ["Previous accepted queries (copy the pattern when the question is similar):"]
-    for row in rows:
-        bits.append(f"Q: {row.get('question')}\n{row.get('sql')}")
-    return "\n\n".join(bits)
+    """Disabled as few-shot source: chronological JSONL taught wrong year filters
+    (e.g. 'in 2025' → only from Sept). Curated examples in generate_sql are safer.
+    Kept for API compatibility / future embedding retrieval.
+    """
+    return ""
+
+
+def _curated_few_shots(as_of_date: str) -> str:
+    """Teach date/metric patterns. LIMIT only appears when the question names N."""
+    return f"""
+Examples (learn the PATTERN — recompute dates and LIMITs from THIS question only):
+
+Q: Top items in 2025
+CHART:bar
+SELECT item_number, SUM(sold_qty) AS qty
+FROM v_sold
+WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01'
+GROUP BY 1 ORDER BY 2 DESC
+
+Q: top 5 items in 2025
+CHART:bar
+SELECT item_number, SUM(sold_qty) AS qty
+FROM v_sold
+WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01'
+GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+
+Q: total sales done in August 2026
+CHART:stat
+SELECT SUM(sold_qty) AS total
+FROM v_sold
+WHERE sale_date >= DATE '2026-08-01' AND sale_date < DATE '2026-09-01'
+
+Q: top 5 customers by quantity this year
+CHART:bar
+SELECT customer_name, SUM(sold_qty) AS qty
+FROM v_sold
+WHERE sale_date >= date_trunc('year', DATE '{as_of_date}')
+  AND sale_date < date_trunc('year', DATE '{as_of_date}') + INTERVAL '1 year'
+GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+
+Q: how many orders last month
+CHART:stat
+SELECT COUNT(DISTINCT sales_order_number) AS orders
+FROM v_orders
+WHERE invoice_date >= date_trunc('month', DATE '{as_of_date}') - INTERVAL '1 month'
+  AND invoice_date < date_trunc('month', DATE '{as_of_date}')
+
+Q: daily sales trend this month
+CHART:line
+SELECT sale_date, SUM(sold_qty) AS daily_total
+FROM v_sold
+WHERE sale_date >= date_trunc('month', DATE '{as_of_date}')
+GROUP BY 1 ORDER BY 1
+
+Q: total cost in 2025
+CHART:stat
+SELECT SUM(cost_amount) AS cost
+FROM v_sold
+WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01'
+
+Q: top 5 items by cost this year
+CHART:bar
+SELECT item_number, SUM(cost_amount) AS cost
+FROM v_sold
+WHERE sale_date >= date_trunc('year', DATE '{as_of_date}')
+  AND sale_date < date_trunc('year', DATE '{as_of_date}') + INTERVAL '1 year'
+GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+
+Q: what is our profit margin
+UNSUPPORTED
+"""
 
 
 def remember_sql(question: str, sql: str) -> None:
@@ -523,7 +576,12 @@ def _strip_trailing_limit(sql: str) -> str:
 
 
 def enforce_limit(sql: str) -> str:
-    """Cap list/item queries at MAX_ROWS. Totals (one SUM/COUNT, no GROUP BY) stay uncapped."""
+    """UI safety only: if the LLM left no LIMIT on a list query, cap at MAX_ROWS.
+
+    Totals (one SUM/COUNT, no GROUP BY) stay uncapped.
+    User-named LIMITs (top 5, etc.) are applied earlier by apply_requested_limit —
+    this does not invent a business top-N.
+    """
     if _is_scalar_aggregate(sql):
         return _strip_trailing_limit(sql)
     if re.search(r"\bLIMIT\b", sql, re.IGNORECASE):
@@ -538,128 +596,76 @@ def sql_intent_mismatch(question: str, sql: str) -> str | None:
 
 def generate_sql(question: str, model: str, db_path: str) -> dict:
     card = build_schema_card(db_path)
-    memory = _memory_shots()
-    
-    # Extract as-of date from card for examples
+
     as_of_date = "current-date"
-    for line in card.split('\n'):
-        if 'Latest sale_date in v_sold' in line and ':' in line:
-            as_of_date = line.split(':')[-1].strip()
+    for line in card.split("\n"):
+        if "Latest sale_date in v_sold" in line and ":" in line:
+            as_of_date = line.split(":")[-1].strip()
             break
-    
-    system = f"""You write DuckDB SQL quickly. Use templates below - no deep reasoning needed.
 
-FORMAT (pick one line, then SQL):
-CHART:stat   → Single number (total, count, average)
-CHART:bar    → Top N rankings (items, customers, warehouses)
-CHART:line   → Time trends (daily, monthly)
-CHART:pie    → Distributions (channels, customers)
-FORECAST     → Future predictions (use JSON format)
-UNSUPPORTED  → Profit, margin, revenue, stock on hand
+    system = f"""You are a DuckDB analyst for a sales & inventory semantic layer.
+Write ONE safe SELECT/WITH that answers the user's question in their own words.
+Any phrasing is fine — interpret intent, then write SQL. Do not invent columns.
 
-AVAILABLE DATA (ONLY these columns exist):
+RESPONSE FORMAT (exactly):
+Line 1: CHART:pie|bar|line|stat
+  pie = share/breakdown  bar = ranking/top-N  line = time series  stat = one number
+Then: the SQL only (no markdown fences, no commentary).
+OR reply with exactly UNSUPPORTED (only if the question needs profit, margin, selling price, revenue, or stock on hand).
+OR reply FORECAST then a JSON window — only if the user asked to forecast/predict future demand.
 
-TABLE v_sold (units sold - use for quantity/items/sales volume):
-  ✓ item_number          Product SKU (same as product_number)
-  ✓ product_number       Product SKU (same as item_number)
-  ✓ sale_date            Physical date when sale happened
-  ✓ sold_qty             Units sold (already POSITIVE, already filtered)
-  ✓ unit                 Unit of measure (pcs, kg, etc)
-  ✓ cost_amount          Inventory cost (NOT selling price, NOT revenue)
-  ✓ site                 Site location
-  ✓ warehouse            Warehouse location
-  ✓ sales_order_number   Order ID (links to v_orders)
-  ✓ customer_account     Customer ID
-  ✓ customer_name        Customer name
-  ✓ invoice_account      Invoice customer
-  ✓ channel              GC001 or NULL (both valid)
-  ✓ sales_taker          Who took the order
-  FILTERS ALREADY APPLIED: Reference='Sales order', Issue='Sold', Order type='Sales order',
-                           Release='Open', Do not process='No', not Canceled
-
-TABLE v_orders (order headers - use for order counts):
-  ✓ sales_order_number   Order ID (unique)
-  ✓ customer_account     Customer ID
-  ✓ customer_name        Customer name
-  ✓ order_type           ALREADY 'Sales order' only
-  ✓ invoice_account      Invoice customer
-  ✓ channel              GC001 or NULL (both valid)
-  ✓ status               Invoiced / Open order / Delivered (Canceled excluded)
-  ✓ release_status       ALREADY 'Open' only
-  ✓ do_not_process       ALREADY 'No' only
-  ✓ sales_taker          Who took the order
-  ✓ site                 Site location
-  ✓ warehouse            Warehouse location
-  ✓ invoice_date         Invoice date
-  NO ITEMS IN THIS TABLE - For items/products, use v_sold
-
-DO NOT use these columns (they don't exist or are already filtered):
-  ✗ financial_date, receipt, issue, reference, location, size, color, style
-  ✗ quantity (use sold_qty), number (use sales_order_number)
-
+LIVE SCHEMA (as-of / "today" for relative dates = {as_of_date}):
 {card}
 
-QUICK TEMPLATES (copy and adapt - no reasoning needed):
+SEMANTIC LAYER (business meaning — already encoded in the views):
+v_sold = completed unit sales (inventory Reference = Sales order, Issue = Sold, joined to order header).
+  Metrics: SUM(sold_qty) for units/volume/"sales"/"buying"; SUM(cost_amount) for cost/spend analysis (not revenue—we lack selling price).
+  Dimensions: item_number (= product_number), sale_date, customer_*, channel, site, warehouse, sales_taker, unit.
+v_orders = sales order headers (Order type = Sales order, Release = Open, Do not process = No, not Canceled).
+  Metrics: COUNT(DISTINCT sales_order_number) for order counts.
+  Dimensions: invoice_date, customer_*, channel, site, warehouse, sales_taker.
+  No item/SKU columns — item questions always use v_sold.
 
-Q: "total sales this month"
-CHART:stat
-SELECT SUM(sold_qty) FROM v_sold WHERE sale_date >= date_trunc('month', DATE '{as_of_date}')
+INTENT → SQL (paraphrase any wording into these):
+- items / products / SKUs / top selling / least selling → v_sold, GROUP BY item_number, SUM(sold_qty)
+- customers by volume / buying → v_sold, GROUP BY customer_name, SUM(sold_qty)
+- customers by orders / how many orders → v_orders, COUNT(DISTINCT sales_order_number)
+- "sales" / "total sales" / "sales done" / "units sold" → SUM(sold_qty) on v_sold (ALWAYS units, never money)
+- "cost" / "total cost" / "cost amount" / "spend" → SUM(cost_amount) on v_sold (what we paid, not selling price)
+- warehouse / site / channel breakdowns → GROUP BY that dimension
+- Always ORDER BY the metric (DESC for top/most, ASC for least).
+- LIMIT: ONLY when the user names a number ("top 5", "10 customers"). If they did not name N, do NOT invent LIMIT.
 
-Q: "top 5 items"
-CHART:bar
-SELECT item_number, SUM(sold_qty) AS qty FROM v_sold GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+DATE RULES (compute from the question — never copy a random month from examples):
+- Bare year "2025" / "in 2025" / "for 2025" = FULL calendar year:
+  sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01'
+  (same idea for any YYYY: start Jan 1 of that year, end Jan 1 of next year)
+- Named month+year "August 2026" = that calendar month only (first day inclusive, next month exclusive)
+- "this month" / "last month" / "this year" are relative to as-of date {as_of_date}, not wall-clock today
+- If a period is empty in the data, still write the SQL (SUM may be NULL/0). That is correct — never UNSUPPORTED for empty periods.
+- Never use FORECAST for historical years/months the user asked about as completed sales.
 
-Q: "top 10 customers by quantity"
-CHART:bar
-SELECT customer_name, SUM(sold_qty) AS qty FROM v_sold GROUP BY 1 ORDER BY 2 DESC LIMIT 10
+COLUMN WHITELIST (from 19 inventory + 14 sales Excel cols, only these made it to views):
+✓ v_sold (from inventory "Sales order" reference + sales order header):
+  item_number, product_number (same SKU), sale_date (=physical_date), sales_order_number (=number),
+  sold_qty (=-quantity, already positive), unit, cost_amount, site, warehouse,
+  customer_account, customer_name, invoice_account, channel, sales_taker
+✓ v_orders (from sales order header where order_type='Sales order', release='Open', do_not_process='No'):
+  sales_order_number, customer_account, customer_name, order_type, invoice_account,
+  channel (GC001 or NULL), status, release_status, do_not_process, sales_taker, site, warehouse, invoice_date
+✗ NOT in views (Excel cols that were filtered out or not included):
+  financial_date, receipt, issue, reference, location, size, color, style, quantity, number, voucher, any other unmapped fields
 
-Q: "top 10 customers by orders"
-CHART:bar
-SELECT customer_name, COUNT(DISTINCT sales_order_number) AS orders FROM v_orders GROUP BY 1 ORDER BY 2 DESC LIMIT 10
-
-Q: "pie chart customers" / "customer breakdown"
-CHART:pie
-SELECT customer_name, SUM(sold_qty) FROM v_sold GROUP BY 1 ORDER BY 2 DESC LIMIT 10
-
-Q: "daily trend this month"
-CHART:line
-SELECT sale_date, SUM(sold_qty) FROM v_sold WHERE sale_date >= date_trunc('month', DATE '{as_of_date}') GROUP BY 1 ORDER BY 1
-
-Q: "sales by warehouse"
-CHART:bar
-SELECT warehouse, SUM(sold_qty) FROM v_sold GROUP BY 1 ORDER BY 2 DESC
-
-Q: "orders by channel"
-CHART:bar
-SELECT channel, COUNT(DISTINCT sales_order_number) FROM v_orders GROUP BY 1 ORDER BY 2 DESC
-
-Q: "forecast next 30 days" / "predict sales"
-FORECAST
-{{"start":"2026-09-04","end":"2026-10-03","grain":"day","item":null}}
-
-Q: "profit margin" / "revenue" / "stock on hand"
-UNSUPPORTED
-
-RULES (must follow):
-1. Latest data date is {as_of_date} - use this as "today"
-2. "this month" = WHERE sale_date >= date_trunc('month', DATE '{as_of_date}')
-3. "last N days" = WHERE sale_date >= DATE '{as_of_date}' - INTERVAL 'N days'
-4. "all items/customers" = ALWAYS add LIMIT 15 (charts become unreadable without limit)
-5. For quantity/volume: use v_sold with SUM(sold_qty)
-6. For order count: use v_orders with COUNT(DISTINCT sales_order_number)
-7. NEVER use v_orders for item_number (it doesn't have items)
-8. channel can be 'GC001' or NULL - both are valid, don't filter
-9. item_number and product_number are the SAME SKU (use either)
-10. cost_amount is inventory cost, NOT selling price or revenue
-
-{memory}
-
-Now write SQL for this question (one template, adapted):"""
+HARD LIMITS:
+- Only query v_sold or v_orders. Never sales_order / inventory_transaction.
+- Never invent columns. If you need a column from the ✗ list above, return UNSUPPORTED.
+{_curated_few_shots(as_of_date)}
+Now answer THIS question with CHART + SQL (or UNSUPPORTED / FORECAST only when rules above say so)."""
 
     try:
-        # DeepSeek optimization: shorter responses = faster
-        token_limit = 300 if "deepseek" in model.lower() else 400
-        
+        # DeepSeek needs room for a short think + full SQL; 300 truncated answers to empty/UNSUPPORTED.
+        token_limit = 900 if "deepseek" in model.lower() else 500
+
         response = call_llm(
             model=model,
             messages=[
@@ -679,18 +685,17 @@ Now write SQL for this question (one template, adapted):"""
             "schema_card": card,
             "llm_ms": 0,
         }
-    
+
     extracted = extract_sql(raw)
-    
-    # Extract chart type hint from response
+
     chart_hint = None
     if raw:
-        first_line = raw.strip().split('\n')[0] if '\n' in raw else raw.strip()
-        if first_line.upper().startswith('CHART:'):
-            chart_hint = first_line.split(':', 1)[1].strip().lower()
-            if chart_hint not in ['pie', 'bar', 'line', 'stat']:
+        first_line = raw.strip().split("\n")[0] if "\n" in raw else raw.strip()
+        if first_line.upper().startswith("CHART:"):
+            chart_hint = first_line.split(":", 1)[1].strip().lower()
+            if chart_hint not in ["pie", "bar", "line", "stat"]:
                 chart_hint = None
-    
+
     return {
         "raw": raw,
         "sql": extracted,
