@@ -155,7 +155,7 @@ VIEW_DDL = [
         it.site,
         it.warehouse,
         it.unit,
-        it.cost_amount,
+        ABS(it.cost_amount) AS cost_amount,
         so.customer_account,
         so.customer_name,
         so.invoice_account,
@@ -395,12 +395,6 @@ CHART:stat
 SELECT SUM(cost_amount) AS cost
 FROM v_sold
 WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01'
-
-Q: total cost this month
-CHART:stat
-SELECT SUM(cost_amount) AS cost
-FROM v_sold
-WHERE sale_date >= date_trunc('month', DATE '{as_of_date}')
 
 Q: top 5 items by cost this year
 CHART:bar
@@ -783,9 +777,7 @@ INTENT → SQL (paraphrase any wording into these):
 - "sales" / "total sales" / "sales done" / "top sales" / "units sold" → SUM(sold_qty) on v_sold (ALWAYS units, never money)
   ⚠️ "top sales" WITHOUT a number = total sales (one aggregate), NOT a ranking
   ⚠️ "top 5 sales" or "top sales by items" = ranking query (GROUP BY + ORDER BY + LIMIT)
-- "cost" / "total cost" / "cost amount" / "spend" / "cost this month" → SUM(cost_amount) on v_sold (ALWAYS SUPPORTED - this is what we paid, not selling price)
-  ⚠️ cost_amount is INVENTORY COST - fully available in the data
-  ⚠️ "total cost" / "cost amount" / "spend" are ALL valid and supported queries
+- "cost" / "total cost" / "cost amount" / "spend" → SUM(cost_amount) on v_sold (what we paid, not selling price)
 - warehouse / site / channel breakdowns → GROUP BY that dimension
 - Always ORDER BY the metric (DESC for top/most, ASC for least).
 - LIMIT: ONLY when the user names a number ("top 5", "10 customers"). If they did not name N, do NOT invent LIMIT.
