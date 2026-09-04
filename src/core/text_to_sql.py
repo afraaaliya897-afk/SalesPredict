@@ -440,8 +440,91 @@ def log_sql_rejection(
         pass
 
 
-def extract_forecast_window(raw: str) -> dict | None:
-    """Parse FORECAST + JSON window from the LLM reply."""
+def _fix_forecast_dates_from_question(question: str, window: dict) -> dict:
+    """Validate and fix forecast end dates when LLM misunderstands 'to [MONTH] [YEAR]'.
+    
+    Small models (llama3.2:3b) often parse "January 2026 to January 2027" as ending 
+    in 2026 instead of 2027. This function extracts the intended end month/year from 
+    the user's question and corrects the date.
+    """
+    if not window or not window.get("end"):
+        return window
+    
+    # Extract "to [MONTH] [YEAR]" pattern from question
+    # Handles: "to January 2027", "to Jan 2027", "through December 2026", etc.
+    to_pattern = r'\b(?:to|through|until)\s+(\w+)\s+(\d{4})\b'
+    match = re.search(to_pattern, question, re.IGNORECASE)
+    
+    if not match:
+        return window
+    
+    month_name = match.group(1).strip()
+    intended_year = match.group(2).strip()
+    
+    # Parse the current end date
+    try:
+        from datetime import datetime
+        current_end = datetime.fromisoformat(window["end"])
+        current_year = str(current_end.year)
+    except (ValueError, TypeError):
+        return window
+    
+    # If LLM used wrong year, fix it
+    if current_year != intended_year:
+        # Map month names to days in month
+        month_map = {
+            "jan": 31, "january": 31,
+            "feb": 28, "february": 28,  # leap year handled below
+            "mar": 31, "march": 31,
+            "apr": 30, "april": 30,
+            "may": 31,
+            "jun": 30, "june": 30,
+            "jul": 31, "july": 31,
+            "aug": 31, "august": 31,
+            "sep": 30, "september": 30,
+            "oct": 31, "october": 31,
+            "nov": 30, "november": 30,
+            "dec": 31, "december": 31,
+        }
+        
+        # Get month number and last day
+        month_key = month_name.lower()
+        month_num = None
+        last_day = None
+        
+        for i, name in enumerate(["january", "february", "march", "april", "may", "june",
+                                   "july", "august", "september", "october", "november", "december"], 1):
+            if name.startswith(month_key):
+                month_num = i
+                last_day = month_map.get(month_key, month_map.get(name, 31))
+                break
+        
+        if month_num and last_day:
+            # Handle February leap year
+            if month_num == 2:
+                year_int = int(intended_year)
+                if (year_int % 4 == 0 and year_int % 100 != 0) or (year_int % 400 == 0):
+                    last_day = 29
+            
+            # Construct corrected end date
+            corrected_end = f"{intended_year}-{month_num:02d}-{last_day:02d}"
+            
+            # Log the correction
+            print(f"⚠️  AUTO-CORRECTED forecast end: {window['end']} → {corrected_end}")
+            print(f"   (LLM used year {current_year}, question specified {intended_year})")
+            
+            window["end"] = corrected_end
+    
+    return window
+
+
+def extract_forecast_window(raw: str, question: str = "") -> dict | None:
+    """Parse FORECAST + JSON window from the LLM reply.
+    
+    Args:
+        raw: LLM response text
+        question: Original user question (used for validation/correction)
+    """
     text = (raw or "").strip()
     if not text:
         return None
@@ -467,12 +550,19 @@ def extract_forecast_window(raw: str) -> dict | None:
         item = str(item).strip()
         if not item or item.lower() in ("null", "none", "all", "*"):
             item = None
-    return {
+    
+    window = {
         "start": data.get("start"),
         "end": data.get("end"),
         "grain": grain,
         "item": item,
     }
+    
+    # Auto-correct common LLM mistakes with date parsing
+    if question:
+        window = _fix_forecast_dates_from_question(question, window)
+    
+    return window
 
 
 def extract_sql(raw: str) -> str | None:
@@ -748,7 +838,7 @@ Now answer THIS question with CHART + SQL (or UNSUPPORTED / FORECAST only when r
         "raw": raw,
         "sql": extracted,
         "chart_hint": chart_hint,
-        "forecast_window": extract_forecast_window(raw),
+        "forecast_window": extract_forecast_window(raw, question),
         "schema_card": card,
         "llm_ms": elapsed_ms,
     }
