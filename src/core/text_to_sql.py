@@ -625,6 +625,11 @@ Line 1: CHART:pie|bar|line|stat
 Then: the SQL only (no markdown fences, no commentary).
 OR reply with exactly UNSUPPORTED (only if the question needs profit, margin, selling price, revenue, or stock on hand).
 OR reply FORECAST then a JSON window — only if the user asked to forecast/predict future demand.
+  FORECAST format: FORECAST {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "grain": "day|week|month", "item": "item_number or null"}}
+  Example: User asks "forecast sales from January 2026 to December 2026"
+    → FORECAST {{"start": "2026-01-01", "end": "2026-12-31", "grain": "month", "item": null}}
+  Example: User asks "predict item ABC next 3 months"
+    → FORECAST {{"start": "2026-09-01", "end": "2026-11-30", "grain": "month", "item": "ABC"}}
 
 LIVE SCHEMA (as-of / "today" for relative dates = {as_of_date}):
 {card}
