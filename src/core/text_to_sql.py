@@ -689,6 +689,7 @@ Now answer THIS question with CHART + SQL (or UNSUPPORTED / FORECAST only when r
         )
         raw = response["content"]
         elapsed_ms = response["llm_ms"]
+        thinking = response.get("thinking")
     except Exception as e:
         print(f"SQL generation failed: {e}")
         return {
@@ -696,6 +697,7 @@ Now answer THIS question with CHART + SQL (or UNSUPPORTED / FORECAST only when r
             "sql": None,
             "schema_card": card,
             "llm_ms": 0,
+            "thinking": None,
         }
 
     extracted = extract_sql(raw)
@@ -715,6 +717,7 @@ Now answer THIS question with CHART + SQL (or UNSUPPORTED / FORECAST only when r
         "forecast_window": extract_forecast_window(raw),
         "schema_card": card,
         "llm_ms": elapsed_ms,
+        "thinking": thinking,
     }
 
 

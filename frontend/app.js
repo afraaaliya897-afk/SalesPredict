@@ -131,6 +131,21 @@ function addAssistantResult(data) {
         contentDiv.appendChild(p);
     });
 
+    // Add collapsible thinking section if available (DeepSeek reasoning)
+    if (data.thinking) {
+        const thinkingCard = document.createElement('details');
+        thinkingCard.className = 'thinking-card';
+        const summary = document.createElement('summary');
+        summary.className = 'thinking-summary';
+        summary.innerHTML = '<span>💭 Model Thoughts</span><span class="thinking-toggle"></span>';
+        const thinkingContent = document.createElement('pre');
+        thinkingContent.className = 'thinking-content';
+        thinkingContent.textContent = data.thinking;
+        thinkingCard.appendChild(summary);
+        thinkingCard.appendChild(thinkingContent);
+        contentDiv.appendChild(thinkingCard);
+    }
+
     const chartType = data.chart_type;
     const tableData = data.table_data || [];
 

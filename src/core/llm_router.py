@@ -165,8 +165,40 @@ def is_model_available(model: str) -> bool:
     return False
 
 
+def _extract_thinking(text: str) -> tuple[str, str | None]:
+    """Extract DeepSeek-R1 reasoning blocks and return (cleaned_text, thinking_content)."""
+    if not text:
+        return text, None
+    
+    # Extract thinking content
+    thinking = None
+    tag = "think"
+    match = re.search(rf"<{tag}>(.*?)</{tag}>", text, flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        thinking = match.group(1).strip()
+    
+    # Remove thinking tags from main content
+    cleaned = re.sub(
+        rf"<{tag}>.*?</{tag}>",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(
+        rf"<{tag}>.*",
+        "",
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+    
+    return cleaned or text.strip(), thinking
+
+
 def _strip_thinking(text: str, verbose: bool = False) -> str:
-    """Remove DeepSeek-R1 / similar reasoning blocks; keep the final answer."""
+    """Remove DeepSeek-R1 / similar reasoning blocks; keep the final answer.
+    
+    DEPRECATED: Use _extract_thinking() for new code to preserve thinking.
+    """
     if not text:
         return text
     
@@ -180,20 +212,8 @@ def _strip_thinking(text: str, verbose: bool = False) -> str:
             print(f"\n... ({len(text) - 2000} more characters) ...")
         print("="*80 + "\n")
     
-    tag = "think"
-    cleaned = re.sub(
-        rf"<{tag}>.*?</{tag}>",
-        "",
-        text,
-        flags=re.DOTALL | re.IGNORECASE,
-    ).strip()
-    cleaned = re.sub(
-        rf"<{tag}>.*",
-        "",
-        cleaned,
-        flags=re.DOTALL | re.IGNORECASE,
-    ).strip()
-    return cleaned or text.strip()
+    cleaned, _ = _extract_thinking(text)
+    return cleaned
 
 
 def call_llm(
@@ -222,17 +242,18 @@ def call_llm(
 
     try:
         if provider == "ollama":
-            response_content = _call_ollama(model, messages, temperature, max_tokens, format_json)
+            result = _call_ollama(model, messages, temperature, max_tokens, format_json)
         elif provider == "openai":
-            response_content = _call_openai(model, messages, temperature, max_tokens, format_json)
+            result = _call_openai(model, messages, temperature, max_tokens, format_json)
         elif provider == "anthropic":
-            response_content = _call_anthropic(model, messages, temperature, max_tokens, format_json)
+            result = _call_anthropic(model, messages, temperature, max_tokens, format_json)
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
         elapsed_ms = round((datetime.utcnow() - started).total_seconds() * 1000, 1)
         return {
-            "content": response_content,
+            "content": result["content"],
+            "thinking": result.get("thinking"),
             "llm_ms": elapsed_ms,
             "provider": provider,
             "model": model,
@@ -281,10 +302,22 @@ def _call_ollama(
                 parts.append(part)
         content = "".join(parts)
     
-    # Strip reasoning blocks from DeepSeek / similar.
-    # Set LLM_VERBOSE=1 env var to see thinking in terminal
+    # Extract reasoning blocks from DeepSeek / similar.
+    # Returns (cleaned_content, thinking_content)
     verbose_logging = os.getenv("LLM_VERBOSE", "").lower() in ("1", "true", "yes")
-    return _strip_thinking(str(content).strip(), verbose=verbose_logging)
+    content_str = str(content).strip()
+    
+    if verbose_logging and "<think>" in content_str.lower():
+        print("\n" + "="*80)
+        print("RAW LLM RESPONSE (with thinking):")
+        print("="*80)
+        print(content_str[:2000])
+        if len(content_str) > 2000:
+            print(f"\n... ({len(content_str) - 2000} more characters) ...")
+        print("="*80 + "\n")
+    
+    cleaned, thinking = _extract_thinking(content_str)
+    return {"content": cleaned, "thinking": thinking}
 
 
 def _call_openai(
@@ -293,7 +326,7 @@ def _call_openai(
     temperature: float,
     max_tokens: int | None,
     format_json: bool,
-) -> str:
+) -> dict[str, Any]:
     """Call OpenAI API."""
     client = _get_openai_client()
     kwargs: dict[str, Any] = {
@@ -306,7 +339,7 @@ def _call_openai(
     if format_json:
         kwargs["response_format"] = {"type": "json_object"}
     response = client.chat.completions.create(**kwargs)
-    return response.choices[0].message.content.strip()
+    return {"content": response.choices[0].message.content.strip(), "thinking": None}
 
 
 def _call_anthropic(
@@ -315,7 +348,7 @@ def _call_anthropic(
     temperature: float,
     max_tokens: int | None,
     format_json: bool,
-) -> str:
+) -> dict[str, Any]:
     """Call Anthropic API."""
     client = _get_anthropic_client()
 
@@ -346,7 +379,7 @@ def _call_anthropic(
     response = client.messages.create(**kwargs)
     for block in response.content:
         if getattr(block, "type", None) == "text":
-            return block.text.strip()
+            return {"content": block.text.strip(), "thinking": None}
     raise ValueError("Anthropic response had no text block (thinking-only reply)")
 
 

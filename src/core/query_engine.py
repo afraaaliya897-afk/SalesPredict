@@ -1562,6 +1562,7 @@ def _answer_with_sql(question: str, db_path: str, debug: dict, model: str) -> di
     debug["model"] = model
     debug["llm_ms"] = generated.get("llm_ms")
     debug["sql_raw"] = generated.get("raw")
+    debug["thinking"] = generated.get("thinking")
     chart_hint = generated.get("chart_hint")
     extracted = generated.get("sql")
 
@@ -1677,6 +1678,7 @@ def _answer_with_sql(question: str, db_path: str, debug: dict, model: str) -> di
         "debug": debug,
         "metric_label": metric_label,
         "dimension_label": dim_label,
+        "thinking": debug.get("thinking"),
     }
 
 
