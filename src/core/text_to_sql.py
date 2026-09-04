@@ -28,7 +28,7 @@ FORBIDDEN_FUNCS = frozenset({
     "iceberg_scan",
 })
 MAX_ROWS = 100
-MAX_SQL_RETRIES = 2
+MAX_SQL_RETRIES = 1  # Reduced from 2 to 1 for faster responses
 MEMORY_PATH = Path(__file__).resolve().parent.parent.parent / "sql_memory.jsonl"
 REJECTION_PATH = Path(__file__).resolve().parent.parent.parent / "sql_rejections.jsonl"
 ORPHAN_MONITOR_PATH = Path(__file__).resolve().parent.parent.parent / "orphaned_sold_monitor.jsonl"
