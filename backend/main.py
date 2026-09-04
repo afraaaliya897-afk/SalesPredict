@@ -93,7 +93,10 @@ def chat(request: ChatRequest):
         import time
 
         start = time.time()
-        result = answer_question(request.question.strip(), model=resolve_model(request.model))
+        # CRITICAL: If user selected a model, use it directly - don't fall back!
+        # The dropdown only shows available models, so if they selected it, it exists
+        user_model = request.model if request.model else None
+        result = answer_question(request.question.strip(), model=user_model)
         debug = result.get("debug") or {}
         debug["execution_time_ms"] = round((time.time() - start) * 1000, 2)
         debug["chart_type"] = result.get("chart_type")

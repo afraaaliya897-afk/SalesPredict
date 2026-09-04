@@ -80,16 +80,17 @@ def select_optimal_model(question: str, requested_model: str | None = None) -> s
     
     Args:
         question: User's question
-        requested_model: Override if user explicitly selected a model
+        requested_model: Override if user explicitly selected a model (from dropdown = already available)
         
     Returns:
         Model name to use
     """
-    # If user explicitly chose a model, respect it
+    # CRITICAL: If user explicitly chose a model from dropdown, USE IT!
+    # The dropdown only shows available models, so no need to validate again
     if requested_model:
-        return resolve_model_router(requested_model)
+        return requested_model
     
-    # Classify complexity
+    # Classify complexity for auto-routing
     complexity = _classify_query_complexity(question)
     
     # Get model from routing config
