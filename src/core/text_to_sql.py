@@ -356,6 +356,12 @@ FROM v_sold
 WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01'
 GROUP BY 1 ORDER BY 2 DESC LIMIT 5
 
+Q: what is top sales done in 2026
+CHART:stat
+SELECT SUM(sold_qty) AS total_sales
+FROM v_sold
+WHERE sale_date >= DATE '2026-01-01' AND sale_date < DATE '2027-01-01'
+
 Q: total sales done in August 2026
 CHART:stat
 SELECT SUM(sold_qty) AS total
@@ -768,7 +774,9 @@ INTENT → SQL (paraphrase any wording into these):
 - items / products / SKUs / top selling / least selling → v_sold, GROUP BY item_number, SUM(sold_qty)
 - customers by volume / buying → v_sold, GROUP BY customer_name, SUM(sold_qty)
 - customers by orders / how many orders → v_orders, COUNT(DISTINCT sales_order_number)
-- "sales" / "total sales" / "sales done" / "units sold" → SUM(sold_qty) on v_sold (ALWAYS units, never money)
+- "sales" / "total sales" / "sales done" / "top sales" / "units sold" → SUM(sold_qty) on v_sold (ALWAYS units, never money)
+  ⚠️ "top sales" WITHOUT a number = total sales (one aggregate), NOT a ranking
+  ⚠️ "top 5 sales" or "top sales by items" = ranking query (GROUP BY + ORDER BY + LIMIT)
 - "cost" / "total cost" / "cost amount" / "spend" → SUM(cost_amount) on v_sold (what we paid, not selling price)
 - warehouse / site / channel breakdowns → GROUP BY that dimension
 - Always ORDER BY the metric (DESC for top/most, ASC for least).
