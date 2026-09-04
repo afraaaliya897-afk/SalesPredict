@@ -398,6 +398,13 @@ WHERE sale_date >= date_trunc('year', DATE '{as_of_date}')
   AND sale_date < date_trunc('year', DATE '{as_of_date}') + INTERVAL '1 year'
 GROUP BY 1 ORDER BY 2 DESC LIMIT 5
 
+Q: pie chart of top 5 customers in 2025
+CHART:pie
+SELECT customer_name, SUM(sold_qty) AS qty
+FROM v_sold
+WHERE sale_date >= DATE '2025-01-01' AND sale_date < DATE '2026-01-01'
+GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+
 Q: what is our profit margin
 UNSUPPORTED
 """
@@ -609,7 +616,12 @@ Any phrasing is fine — interpret intent, then write SQL. Do not invent columns
 
 RESPONSE FORMAT (exactly):
 Line 1: CHART:pie|bar|line|stat
-  pie = share/breakdown  bar = ranking/top-N  line = time series  stat = one number
+  IMPORTANT: If user explicitly asks for a chart type ("pie chart", "bar chart", "line chart"), ALWAYS use that type.
+  Otherwise, use these defaults:
+    pie = share/breakdown (2-10 items)
+    bar = ranking/top-N (any count)
+    line = time series/trend
+    stat = one number
 Then: the SQL only (no markdown fences, no commentary).
 OR reply with exactly UNSUPPORTED (only if the question needs profit, margin, selling price, revenue, or stock on hand).
 OR reply FORECAST then a JSON window — only if the user asked to forecast/predict future demand.
