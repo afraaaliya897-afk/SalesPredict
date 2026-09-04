@@ -628,22 +628,36 @@ OR reply FORECAST then a JSON window — only if the user asked to forecast/pred
   
 FORECAST format: FORECAST {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "grain": "day|week|month", "item": "item_number or null"}}
 
-CRITICAL DATE PARSING RULES (NEVER IGNORE):
-⚠️ "to January YYYY" means INCLUDE ALL OF JANUARY YYYY → end: "YYYY-01-31" (NOT "YYYY-01-01")
-⚠️ "from January 2026 to January 2027" = 13 months → start: "2026-01-01", end: "2027-01-31"
-- "from January 2026 to December 2026" → start: "2026-01-01", end: "2026-12-31" (full 12 months)
-- "next 3 months" → start: first day of next month, end: last day of 3rd month
-- Always use LAST DAY of end month (31st, 30th, 28th/29th depending on month)
-- WRONG: end: "2027-01-01" ← This is the FIRST day, not the whole month!
-- CORRECT: end: "2027-01-31" ← This includes ALL of January 2027
+CRITICAL DATE PARSING RULES (APPLIES TO ANY MONTH/YEAR):
+⚠️ "to [MONTH] [YEAR]" means INCLUDE ALL OF THAT MONTH → use LAST DAY of that month
+⚠️ Examples for ANY month:
+  - "to January 2027" → end: "2027-01-31" (31 days)
+  - "to February 2027" → end: "2027-02-28" (or 29 for leap year)
+  - "to March 2027" → end: "2027-03-31" (31 days)
+  - "to April 2027" → end: "2027-04-30" (30 days)
+  - "to December 2028" → end: "2028-12-31" (31 days)
 
-Examples (COPY THESE DATES EXACTLY):
+⚠️ "from [MONTH1] [YEAR1] to [MONTH2] [YEAR2]" = ALL months between them (inclusive)
+  - WRONG: using first day of end month (excludes that month)
+  - CORRECT: using last day of end month (includes full month)
+
+⚠️ Key rule: ALWAYS compute the LAST DAY of the end month!
+  - January, March, May, July, August, October, December → 31 days
+  - April, June, September, November → 30 days
+  - February → 28 days (29 in leap years)
+
+Examples (handles ANY date range dynamically):
 Q: forecast sales from January 2026 to December 2026
 FORECAST {{"start": "2026-01-01", "end": "2026-12-31", "grain": "month", "item": null}}
 
 Q: predict sales from January 2026 to January 2027
 FORECAST {{"start": "2026-01-01", "end": "2027-01-31", "grain": "month", "item": null}}
-⚠️ NOTE: end is 2027-01-31 NOT 2026-01-31!
+
+Q: forecast March 2026 to June 2026
+FORECAST {{"start": "2026-03-01", "end": "2026-06-30", "grain": "month", "item": null}}
+
+Q: predict sales for all of 2027
+FORECAST {{"start": "2027-01-01", "end": "2027-12-31", "grain": "month", "item": null}}
 
 Q: forecast item ABC next 3 months
 FORECAST {{"start": "2026-09-01", "end": "2026-11-30", "grain": "month", "item": "ABC"}}
