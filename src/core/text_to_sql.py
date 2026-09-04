@@ -625,11 +625,24 @@ Line 1: CHART:pie|bar|line|stat
 Then: the SQL only (no markdown fences, no commentary).
 OR reply with exactly UNSUPPORTED (only if the question needs profit, margin, selling price, revenue, or stock on hand).
 OR reply FORECAST then a JSON window — only if the user asked to forecast/predict future demand.
-  FORECAST format: FORECAST {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "grain": "day|week|month", "item": "item_number or null"}}
-  Example: User asks "forecast sales from January 2026 to December 2026"
-    → FORECAST {{"start": "2026-01-01", "end": "2026-12-31", "grain": "month", "item": null}}
-  Example: User asks "predict item ABC next 3 months"
-    → FORECAST {{"start": "2026-09-01", "end": "2026-11-30", "grain": "month", "item": "ABC"}}
+  
+FORECAST format: FORECAST {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "grain": "day|week|month", "item": "item_number or null"}}
+
+CRITICAL DATE PARSING RULES:
+- "from January 2026 to December 2026" → start: "2026-01-01", end: "2026-12-31" (full 12 months)
+- "from January 2026 to January 2027" → start: "2026-01-01", end: "2027-01-31" (13 months INCLUDING all of Jan 2027)
+- "next 3 months" → start: first day of next month, end: last day of 3rd month
+- Always use LAST DAY of end month (31st, 30th, 28th/29th depending on month)
+
+Examples:
+Q: forecast sales from January 2026 to December 2026
+FORECAST {{"start": "2026-01-01", "end": "2026-12-31", "grain": "month", "item": null}}
+
+Q: predict sales from January 2026 to January 2027
+FORECAST {{"start": "2026-01-01", "end": "2027-01-31", "grain": "month", "item": null}}
+
+Q: forecast item ABC next 3 months
+FORECAST {{"start": "2026-09-01", "end": "2026-11-30", "grain": "month", "item": "ABC"}}
 
 LIVE SCHEMA (as-of / "today" for relative dates = {as_of_date}):
 {card}
