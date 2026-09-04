@@ -131,22 +131,6 @@ function addAssistantResult(data) {
         contentDiv.appendChild(p);
     });
 
-    // Add collapsible thinking section if available (DeepSeek reasoning)
-    if (data.thinking) {
-        const thinkingCard = document.createElement('details');
-        thinkingCard.className = 'thinking-card';
-        thinkingCard.open = true;  // Auto-expand to show thinking
-        const summary = document.createElement('summary');
-        summary.className = 'thinking-summary';
-        summary.innerHTML = '<span>💭 Model Thoughts</span><span class="thinking-toggle"></span>';
-        const thinkingContent = document.createElement('pre');
-        thinkingContent.className = 'thinking-content';
-        thinkingContent.textContent = data.thinking;
-        thinkingCard.appendChild(summary);
-        thinkingCard.appendChild(thinkingContent);
-        contentDiv.appendChild(thinkingCard);
-    }
-
     const chartType = data.chart_type;
     const tableData = data.table_data || [];
 
@@ -1174,12 +1158,8 @@ function addLoadingMessage() {
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';
 
-    // Show different loading text for DeepSeek (reasoning models)
-    const model = modelSelect && modelSelect.value ? modelSelect.value : '';
-    const isDeepSeek = model.toLowerCase().includes('deepseek');
-
     const loadingText = document.createElement('span');
-    loadingText.textContent = isDeepSeek ? '💭 Thinking & writing SQL' : 'Writing SQL';
+    loadingText.textContent = 'Writing SQL';
 
     const loadingDots = document.createElement('div');
     loadingDots.className = 'loading-dots';
