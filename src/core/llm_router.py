@@ -60,6 +60,18 @@ MODEL_REGISTRY = {
         "note": "Fastest local — quick queries",
         "family": "llama",
     },
+    "deepseek-r1:1.5b": {
+        "provider": "ollama",
+        "label": "DeepSeek R1 1.5B",
+        "note": "Ultra-fast — simple queries (auto-routed)",
+        "family": "deepseek",
+    },
+    "deepseek-r1:7b": {
+        "provider": "ollama",
+        "label": "DeepSeek R1 7B",
+        "note": "Balanced — medium queries (auto-routed)",
+        "family": "deepseek",
+    },
     "qwen2.5:7b": {
         "provider": "ollama",
         "label": "Qwen 2.5 7B",
@@ -69,7 +81,7 @@ MODEL_REGISTRY = {
     "deepseek-r1:8b": {
         "provider": "ollama",
         "label": "DeepSeek R1 8B",
-        "note": "Local reasoning — lighter GPU/RAM",
+        "note": "Local reasoning — complex queries (auto-routed)",
         "family": "deepseek",
     },
     "deepseek-r1:14b": {
@@ -96,6 +108,8 @@ MODEL_REGISTRY = {
 LOCAL_FALLBACK_ORDER = (
     "deepseek-r1:14b",
     "deepseek-r1:8b",
+    "deepseek-r1:7b",
+    "deepseek-r1:1.5b",
     "qwen2.5:7b",
     "llama3.2:3b",
 )
