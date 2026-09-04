@@ -29,6 +29,80 @@ PARALLEL_COMPARISON_PATH = Path(__file__).resolve().parent.parent.parent / "para
 # Default model (will be resolved by llm_router)
 MODEL = "llama3.2:3b"
 
+# Model routing configuration - faster models for simple queries
+MODEL_ROUTING = {
+    "simple": "deepseek-r1:1.5b",   # Fast reasoning for basic queries
+    "medium": "deepseek-r1:7b",     # Balanced performance
+    "complex": "deepseek-r1:8b",    # Full reasoning for complex queries
+    "fallback": "llama3.2:3b"       # If DeepSeek not available
+}
+
+
+def _classify_query_complexity(question: str) -> str:
+    """Classify query complexity to route to appropriate model.
+    
+    Returns: "simple", "medium", or "complex"
+    """
+    q_lower = (question or "").lower()
+    
+    # Simple: single metric, no filters, common patterns
+    simple_patterns = [
+        r"^total ",
+        r"^how many ",
+        r"^count ",
+        r"^sum ",
+        r"^\w+ in \d{4}$",  # "sales in 2025"
+        r"^top \d+ \w+$",   # "top 5 items"
+    ]
+    if any(re.match(p, q_lower) for p in simple_patterns):
+        return "simple"
+    
+    # Complex: multi-dimensional, comparisons, forecasts, multiple filters
+    complex_indicators = [
+        "compare", "vs", "versus", "forecast", "predict",
+        "by site and", "by channel and", "by warehouse and",
+        "last year vs this year", "yoy", "year over year",
+        "breakdown by multiple", "group by"
+    ]
+    if any(ind in q_lower for ind in complex_indicators):
+        return "complex"
+    
+    # Complex: long questions (>100 chars likely multi-condition)
+    if len(question) > 100:
+        return "complex"
+    
+    # Medium: everything else (most queries)
+    return "medium"
+
+
+def select_optimal_model(question: str, requested_model: str | None = None) -> str:
+    """Auto-select optimal model based on query complexity.
+    
+    Args:
+        question: User's question
+        requested_model: Override if user explicitly selected a model
+        
+    Returns:
+        Model name to use
+    """
+    # If user explicitly chose a model, respect it
+    if requested_model:
+        return resolve_model_router(requested_model)
+    
+    # Classify complexity
+    complexity = _classify_query_complexity(question)
+    
+    # Get model from routing config
+    model = MODEL_ROUTING.get(complexity, MODEL_ROUTING["medium"])
+    
+    # Try to resolve, fall back to default if not available
+    try:
+        return resolve_model_router(model)
+    except Exception:
+        # If preferred model not available, try fallback
+        fallback = MODEL_ROUTING.get("fallback", MODEL)
+        return resolve_model_router(fallback)
+
 
 def list_chat_models() -> list[dict]:
     """Get list of all available chat models from llm_router."""
@@ -1772,8 +1846,10 @@ def answer_question(
     Chat uses text-to-SQL. Pass `plan` to skip the LLM (eval / compiler tests).
     """
     debug: dict = {}
-    chosen = resolve_model(model)
+    # Smart model selection: auto-route based on query complexity
+    chosen = select_optimal_model(question, model)
     debug["model"] = chosen
+    debug["model_selection"] = _classify_query_complexity(question) if not model else "user_override"
     if plan is None:
         result = _answer_with_sql(question, db_path, debug, chosen)
         _log_parallel_comparison(question, result, db_path)
