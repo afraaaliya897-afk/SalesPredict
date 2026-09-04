@@ -1173,6 +1173,26 @@ function addLoadingMessage() {
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';
 
+    // Add thinking section immediately for DeepSeek models
+    const model = modelSelect && modelSelect.value ? modelSelect.value : '';
+    if (model.toLowerCase().includes('deepseek')) {
+        const thinkingCard = document.createElement('details');
+        thinkingCard.className = 'thinking-card';
+        thinkingCard.open = true;
+        
+        const summary = document.createElement('summary');
+        summary.className = 'thinking-summary';
+        summary.innerHTML = '<span>💭 Model is thinking...</span><span class="thinking-toggle"></span>';
+        
+        const thinkingContent = document.createElement('pre');
+        thinkingContent.className = 'thinking-content streaming';
+        thinkingContent.textContent = 'Analyzing question and schema...\n';
+        
+        thinkingCard.appendChild(summary);
+        thinkingCard.appendChild(thinkingContent);
+        contentDiv.appendChild(thinkingCard);
+    }
+
     const loadingText = document.createElement('span');
     loadingText.textContent = 'Writing SQL';
 
