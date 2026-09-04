@@ -1632,7 +1632,12 @@ def _answer_with_sql(question: str, db_path: str, debug: dict, model: str) -> di
         }
         return _handle_forecast(question, plan, {**debug, "engine": "forecast", "query_plan": plan})
 
+    import time
+    t0 = time.time()
     generated = generate_sql(question, model, db_path)
+    t1 = time.time()
+    print(f"⏱️  LLM call took {(t1-t0):.1f}s")
+    
     debug["engine"] = "text_to_sql"
     debug["model"] = model
     debug["llm_ms"] = generated.get("llm_ms")
@@ -1698,16 +1703,20 @@ def _answer_with_sql(question: str, db_path: str, debug: dict, model: str) -> di
     last_error = None
     for attempt in range(MAX_SQL_RETRIES + 1):
         try:
+            t_sql = time.time()
             df = execute(sql, db_path=db_path)
+            print(f"⏱️  SQL execution took {(time.time()-t_sql):.2f}s (attempt {attempt + 1})")
             last_error = None
             break
         except Exception as exc:
             last_error = str(exc)
             attempts.append({"sql": sql, "error": last_error})
-            print(f"SQL execute failed (attempt {attempt + 1}): {last_error}")
+            print(f"❌ SQL execute failed (attempt {attempt + 1}): {last_error}")
             if attempt >= MAX_SQL_RETRIES:
                 break
+            t_retry = time.time()
             rewritten = rewrite_sql_after_error(question, extracted, last_error, model)
+            print(f"⏱️  SQL rewrite LLM call took {(time.time()-t_retry):.1f}s")
             debug["llm_ms"] = (debug.get("llm_ms") or 0) + (rewritten.get("llm_ms") or 0)
             extracted = rewritten.get("sql")
             if extracted in (None, "FORECAST", "UNSUPPORTED"):
@@ -1738,6 +1747,9 @@ def _answer_with_sql(question: str, db_path: str, debug: dict, model: str) -> di
     remember_sql(question, extracted)
     chart_data, table_data, chart_type, metric_label, dim_label, chart_truncated = _payloads_from_sql_df(df, question, chart_hint)
     debug["execution"] = {"rows_returned": int(len(df)), "columns": list(df.columns), "chart_truncated": chart_truncated}
+    
+    total_time = time.time() - t0
+    print(f"✅ Total query time: {total_time:.1f}s (LLM: {debug.get('llm_ms', 0)/1000:.1f}s, SQL: {total_time - debug.get('llm_ms', 0)/1000:.2f}s)")
     
     answer_text = _sql_answer_text(df, question, model)
     if chart_truncated and answer_text:
