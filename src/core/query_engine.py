@@ -29,23 +29,27 @@ PARALLEL_COMPARISON_PATH = Path(__file__).resolve().parent.parent.parent / "para
 # Default model (will be resolved by llm_router)
 MODEL = "llama3.2:3b"
 
-# Model routing configuration - faster models for simple queries
+# Model routing configuration - Qwen for SQL, DeepSeek for reasoning
 MODEL_ROUTING = {
-    "simple": "deepseek-r1:1.5b",   # Fast reasoning for basic queries
-    "medium": "deepseek-r1:7b",     # Balanced performance
-    "complex": "deepseek-r1:7b",    # Use 7b for complex too (8b removed)
-    "fallback": "llama3.2:3b"       # If DeepSeek not available
+    "simple": "qwen2.5:7b",         # SQL specialist - no think overhead
+    "medium": "qwen2.5:7b",         # SQL specialist - no think overhead
+    "complex": "deepseek-r1:7b",    # Reasoning for forecast/comparisons only
+    "fallback": "llama3.2:3b"       # Lightweight fallback
 }
 
 
 def _classify_query_complexity(question: str) -> str:
     """Classify query complexity to route to appropriate model.
     
+    Simple/Medium → Qwen2.5:7B (SQL specialist, no reasoning overhead)
+    Complex → DeepSeek-R1:7B (reasoning for forecasts/comparisons)
+    
     Returns: "simple", "medium", or "complex"
     """
     q_lower = (question or "").lower()
     
     # Simple: single metric, no filters, common patterns
+    # Routes to Qwen (fast SQL generation)
     simple_patterns = [
         r"^total ",
         r"^how many ",
@@ -57,7 +61,8 @@ def _classify_query_complexity(question: str) -> str:
     if any(re.match(p, q_lower) for p in simple_patterns):
         return "simple"
     
-    # Complex: multi-dimensional, comparisons, forecasts, multiple filters
+    # Complex: forecasts, comparisons, multi-dimensional
+    # Routes to DeepSeek (reasoning-heavy queries benefit from chain-of-thought)
     complex_indicators = [
         "compare", "vs", "versus", "forecast", "predict",
         "by site and", "by channel and", "by warehouse and",
@@ -71,7 +76,7 @@ def _classify_query_complexity(question: str) -> str:
     if len(question) > 100:
         return "complex"
     
-    # Medium: everything else (most queries)
+    # Medium: most SQL queries (routes to Qwen)
     return "medium"
 
 
