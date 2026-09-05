@@ -33,7 +33,7 @@ MODEL = "llama3.2:3b"
 MODEL_ROUTING = {
     "simple": "deepseek-r1:1.5b",   # Fast reasoning for basic queries
     "medium": "deepseek-r1:7b",     # Balanced performance
-    "complex": "deepseek-r1:8b",    # Full reasoning for complex queries
+    "complex": "deepseek-r1:7b",    # Use 7b for complex too (8b removed)
     "fallback": "llama3.2:3b"       # If DeepSeek not available
 }
 

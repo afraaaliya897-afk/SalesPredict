@@ -78,18 +78,6 @@ MODEL_REGISTRY = {
         "note": "Stronger SQL — local",
         "family": "qwen",
     },
-    "deepseek-r1:8b": {
-        "provider": "ollama",
-        "label": "DeepSeek R1 8B",
-        "note": "Local reasoning — complex queries (auto-routed)",
-        "family": "deepseek",
-    },
-    "deepseek-r1:14b": {
-        "provider": "ollama",
-        "label": "DeepSeek R1 14B",
-        "note": "Best local SQL/reasoning — needs more RAM",
-        "family": "deepseek",
-    },
     "gpt-4o-mini": {
         "provider": "openai",
         "label": "GPT-4o Mini",
@@ -106,8 +94,6 @@ MODEL_REGISTRY = {
 
 # Prefer stronger local models when the requested one is missing.
 LOCAL_FALLBACK_ORDER = (
-    "deepseek-r1:14b",
-    "deepseek-r1:8b",
     "deepseek-r1:7b",
     "deepseek-r1:1.5b",
     "qwen2.5:7b",
@@ -121,10 +107,9 @@ MODEL_ALIASES = {
     "claude-3-7-sonnet-20250219": "claude-sonnet-5",
     "claude-sonnet-4-5": "claude-sonnet-5",
     "claude-sonnet-4-6": "claude-sonnet-5",
-    "deepseek-r1": "deepseek-r1:14b",
-    "deepseek-r1:latest": "deepseek-r1:14b",
-    "deepseek-r1:7b": "deepseek-r1:8b",
-    "deepseek": "deepseek-r1:14b",
+    "deepseek-r1": "deepseek-r1:7b",          # Changed from 14b to 7b
+    "deepseek-r1:latest": "deepseek-r1:7b",   # Changed from 14b to 7b
+    "deepseek": "deepseek-r1:7b",             # Changed from 14b to 7b
 }
 
 # Safe default on small machines; resolve_model upgrades to DeepSeek/Qwen when pulled.
